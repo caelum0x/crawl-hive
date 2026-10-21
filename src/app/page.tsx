@@ -17,6 +17,7 @@ import { WalletSafety } from "@/components/wallet-safety";
 import { Shipped } from "@/components/shipped";
 import { TelegramCta } from "@/components/telegram-cta";
 import { XBotBanner } from "@/components/x-bot-banner";
+import { BrainBanner } from "@/components/brain-banner";
 import { WhatsNew } from "@/components/whats-new";
 import { useStream } from "@/lib/client/use-stream";
 import { fmt, timeLeft } from "@/lib/utils";
@@ -63,6 +64,7 @@ export default function Dashboard() {
       <InstantCrawl />
 
       <XBotBanner className="mb-6" />
+      <BrainBanner className="mb-6" />
       <TelegramCta className="mb-6" />
 
       <WhatsNew />

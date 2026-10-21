@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 
 export const metadata: Metadata = { title: "Browser extension · CrawlHive", description: "The CrawlHive verdict right on the token page of your terminal, for Solana, BNB Chain, Robinhood Chain and Base, with a second opinion from Larpcheck." };
 
-const SITES = ["GMGN", "DexScreener", "Axiom", "Photon", "pump.fun", "Birdeye", "Solscan"];
+const SITES = ["GMGN", "DexScreener", "Axiom", "Photon", "pump.fun", "FOMO", "Birdeye", "Solscan", "BscScan", "BaseScan"];
 const STORE_URL = "https://chromewebstore.google.com/detail/crawlhive-memecoin-safety/fockphbbbdmefepkngelchjnhnfdkmnm";
 
 export default function ExtensionPage() {

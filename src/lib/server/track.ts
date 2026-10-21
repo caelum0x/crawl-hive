@@ -240,6 +240,25 @@ export function trackOutcomes(): Map<string, { dumped: boolean; rugged: boolean;
   return m;
 }
 
+// Последняя запись Track Record по каждому токену (EVM в нижнем регистре) — для Brain API. Кэш на 30 с:
+// пакетный запрос по сотне кошельков не должен разбирать весь журнал на каждый токен.
+let indexCache: { at: number; m: Map<string, TrackEntry & { anyDumped: boolean; anyRugged: boolean }> } | null = null;
+export function trackIndex() {
+  if (indexCache && Date.now() - indexCache.at < 30_000) return indexCache.m;
+  const m = new Map<string, TrackEntry & { anyDumped: boolean; anyRugged: boolean }>();
+  for (const e of all()) {
+    const k = e.id.startsWith("0x") ? e.id.toLowerCase() : e.id;
+    const prev = m.get(k);
+    if (!prev) m.set(k, { ...e, anyDumped: !!e.dumped, anyRugged: !!e.rugged });
+    else {
+      prev.anyDumped ||= !!e.dumped;
+      prev.anyRugged ||= !!e.rugged;
+    }
+  }
+  indexCache = { at: Date.now(), m };
+  return m;
+}
+
 // Для ежедневного контента: лучшее попадание CLEAN/OK и самый наглядный пойманный DANGER за окно.
 export function dayHighlights(fromMs: number) {
   const list = all().filter((e) => e.at >= fromMs);

@@ -236,6 +236,12 @@ export function seenBefore(wallets: string[], token: string): Map<string, Seen> 
   return res;
 }
 
+// Вся память по одному кошельку (для Brain API): токены, сеть и роль, новые в конце.
+export function walletEntries(wallet: string): { token: string; chain: string; role: MemRole }[] {
+  return entries(loadMem()[norm(wallet)]).map((e) => ({ token: e.t, chain: e.c, role: e.r }));
+}
+export const walletMemSize = () => Object.keys(loadMem()).length;
+
 // Эти кошельки на ДРУГИХ токенах: сколько токенов и сколько из них рухнули (только закрытые исходы).
 export function walletHistory(wallets: string[], token: string) {
   const m = loadMem();

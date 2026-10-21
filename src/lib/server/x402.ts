@@ -29,7 +29,7 @@ const NETS: Record<string, { v1: string; usdc: string }> = {
 // PayAI: Solana mainnet без ключа API (бесплатный лимит на кошелёк получателя, дальше кредиты).
 const DEFAULT_FACILITATOR = "https://facilitator.payai.network";
 
-export type X402Route = "scan" | "scan-x";
+export type X402Route = "scan" | "scan-x" | "brain" | "brain-batch";
 
 const ROUTES: Record<X402Route, { path: string; priceEnv: string; price: number; timeout: number; description: string }> = {
   scan: {
@@ -47,7 +47,23 @@ const ROUTES: Record<X402Route, { path: string; priceEnv: string; price: number;
     timeout: 90,
     description: "CrawlHive memecoin safety scan plus an X buzz check by Grok: who is talking about the token on X in the last two days, sentiment and scam warnings.",
   },
+  // CrawlHive Brain (brain.ts): платят только сверх бесплатного лимита, путь у вызова свой (wallet/dev/token).
+  brain: {
+    path: "/api/brain/v1/wallet/{address}",
+    priceEnv: "X402_PRICE_BRAIN",
+    price: 0.002,
+    timeout: 60,
+    description: "CrawlHive Brain lookup: what the swarm remembers about a wallet, a dev or a token from past scans (roles, outcomes, verdict history). No new scan is run.",
+  },
+  "brain-batch": {
+    path: "/api/brain/v1/wallets",
+    priceEnv: "X402_PRICE_BRAIN_BATCH",
+    price: 0.02,
+    timeout: 60,
+    description: "CrawlHive Brain batch: screen up to 100 wallets against the swarm's memory of snipers, bundles, devs and their outcomes.",
+  },
 };
+const isBrain = (r: X402Route) => r === "brain" || r === "brain-batch";
 
 interface Cfg {
   payTo: string;
@@ -154,7 +170,8 @@ async function feePayers(cfg: Cfg): Promise<{ v2?: string; v1?: string }> {
 
 // ---------- требования к оплате ----------
 
-const resourceUrl = (req: NextRequest, route: X402Route) => `${ISSUER}${ROUTES[route].path}${req.nextUrl.search}`;
+// Путь берём из запроса: у Brain он содержит адрес (wallet/dev/token), у сканов совпадает с ROUTES.
+const resourceUrl = (req: NextRequest, _route: X402Route) => `${ISSUER}${req.nextUrl.pathname}${req.nextUrl.search}`;
 
 function reqV2(cfg: Cfg, route: X402Route, feePayer: string): PaymentRequirements {
   return {
@@ -179,7 +196,7 @@ function reqV1(cfg: Cfg, route: X402Route, feePayer: string, url: string): Payme
     payTo: cfg.payTo,
     maxTimeoutSeconds: ROUTES[route].timeout,
     asset: cfg.asset,
-    outputSchema: { input: { type: "http", method: "GET", discoverable: true, queryParams: QUERY_SCHEMA }, output: { type: "json" } },
+    outputSchema: { input: { type: "http", method: route === "brain-batch" ? "POST" : "GET", discoverable: true, queryParams: isBrain(route) ? {} : QUERY_SCHEMA }, output: { type: "json" } },
     extra: { feePayer },
   };
 }
@@ -191,6 +208,13 @@ const QUERY_SCHEMA = {
 
 // Расширение bazaar (specs/extensions/bazaar.md): каталоги и фасилитатор узнают, какие параметры принимает вызов.
 function bazaar(route: X402Route) {
+  if (isBrain(route))
+    return {
+      info: {
+        input: route === "brain" ? { type: "http", method: "GET" } : { type: "http", method: "POST", bodyType: "json", body: { wallets: ["<address>"] } },
+        output: { type: "json", example: route === "brain" ? { wallet: "<address>", seen: true, tokens: 6, outcomes: { settled: 5, dumped: 4 } } : { checked: 2, seen: 1, results: [] } },
+      },
+    };
   return {
     info: {
       input: { type: "http", method: "GET", queryParams: { q: "$BONK", chain: "solana" } },
@@ -239,8 +263,8 @@ function paymentRequired(cfg: Cfg, route: X402Route, url: string, fp: { v2?: str
 
 export const X402_CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, PAYMENT-SIGNATURE, X-PAYMENT",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, PAYMENT-SIGNATURE, X-PAYMENT",
   "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-PAYMENT-RESPONSE",
 };
 const b64 = (v: unknown) => Buffer.from(JSON.stringify(v), "utf8").toString("base64");
@@ -402,7 +426,7 @@ const WINDOW = 10 * 60_000;
 export async function paidCall(
   req: NextRequest,
   route: X402Route,
-  o: { ready: boolean; precheck?: () => string | null; work: () => Promise<unknown> },
+  o: { ready: boolean; need?: string; precheck?: () => string | null; work: () => Promise<unknown> },
 ): Promise<Response> {
   const cfg = x402Config();
   if (!cfg) return x402Off();
@@ -417,7 +441,7 @@ export async function paidCall(
   const url = resourceUrl(req, route);
   const pr = (error: string) => paymentRequired(cfg, route, url, fp, error);
   const pay = readPayment(req);
-  if (pay === undefined) return challenge(pr(o.ready ? "PAYMENT-SIGNATURE header is required" : "Pass ?q=<token address or $TICKER>, then pay"));
+  if (pay === undefined) return challenge(pr(o.need ?? (o.ready ? "PAYMENT-SIGNATURE header is required" : "Pass ?q=<token address or $TICKER>, then pay")));
   if (pay === null) return challenge(pr("Malformed payment header"), 400);
   if (!o.ready) return json({ error: "q is required: a token address, a DexScreener / pump.fun link or a $TICKER. You were not charged." }, 400);
 
@@ -524,15 +548,16 @@ export async function x402Manifest() {
     name: "CrawlHive",
     description: "Memecoin safety scans for AI agents, paid per call in USDC on Solana. No account, no API key.",
     docs: "https://github.com/h100envy/crawl-hive#pay-per-call-with-x402",
-    resources: routes.map((r) => `${ISSUER}${ROUTES[r].path}`),
+    // Пути Brain с {address} — шаблоны, их каталоги не должны опрашивать как есть.
+    resources: routes.filter((r) => !isBrain(r)).map((r) => `${ISSUER}${ROUTES[r].path}`),
     items: routes.map((r) => ({
       resource: `${ISSUER}${ROUTES[r].path}`,
       type: "http",
-      method: "GET",
+      method: r === "brain-batch" ? "POST" : "GET",
       x402Version: 2,
       description: ROUTES[r].description,
       price: { currency: "USD", amount: String(priceUsd(r)), asset: "USDC", network: cfg.network },
-      queryParams: QUERY_SCHEMA,
+      queryParams: isBrain(r) ? {} : QUERY_SCHEMA,
       accepts: fp.v2 ? [reqV2(cfg, r, fp.v2)] : [],
       lastUpdated: new Date().toISOString(),
     })),
@@ -549,13 +574,13 @@ export function withDeadline<T>(p: Promise<T>, ms: number, msg: string): Promise
 }
 
 // Цены для описаний в MCP и на сайте.
-export const x402Prices = () => ({ scan: priceUsd("scan"), scanX: priceUsd("scan-x") });
+export const x402Prices = () => ({ scan: priceUsd("scan"), scanX: priceUsd("scan-x"), brain: priceUsd("brain"), brainBatch: priceUsd("brain-batch") });
 
 // /openapi.json: описание API для агентов и каталогов (x402scan читает его первым, Circle требует).
 // Платные операции помечены x-payment-info и ответом 402, бесплатные (доказательство, A2A) — без них.
 export function openApi() {
   const cfg = x402Config();
-  const routes = Object.keys(ROUTES) as X402Route[];
+  const routes = (Object.keys(ROUTES) as X402Route[]).filter((r) => !isBrain(r));
   const scanParams = [
     { name: "q", in: "query", required: true, description: "Token address, pump.fun or DexScreener link, or $TICKER", schema: { type: "string", maxLength: 200 } },
     { name: "chain", in: "query", required: false, description: "Where to look up a $TICKER (default solana)", schema: { type: "string", enum: ["solana", "bsc", "robinhood"] } },

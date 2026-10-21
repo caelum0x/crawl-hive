@@ -4,7 +4,8 @@
 // Навыки: бесплатный скан (тот же лимит по IP, что у Instant Crawl на сайте), ончейн-доказательство записи
 // и сводка Track Record. Платный скан без лимита — по x402, ссылка в карточке.
 import "server-only";
-import { allowScan, runScan } from "./scan";
+import { allowHit, allowScan, runScan } from "./scan";
+import { BRAIN_LIMITS, walletReport } from "./brain";
 import { scanBrief } from "./scan-brief";
 import { trackStats } from "./track";
 import { findProof, proofSummary } from "./proof";
@@ -48,6 +49,13 @@ export function agentCard() {
         examples: ["proof DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"],
       },
       {
+        id: "brain-wallet",
+        name: "Wallet memory (CrawlHive Brain)",
+        description: "What the swarm remembers about a wallet from past scans: tokens where it sniped, bundled, launched or funded, and how they ended. Instant, no new scan. Free, 30 per 10 minutes per network.",
+        tags: ["wallet-reputation", "snipers", "memory"],
+        examples: ["wallet 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"],
+      },
+      {
         id: "track-record",
         name: "Track record",
         description: "How often tokens with each verdict dumped or rugged within 24 hours of the scan, misses included.",
@@ -87,6 +95,18 @@ async function answer(t: string, ip: string): Promise<{ text: string; data?: unk
     const lines = s.by.filter((b) => b.settled).map((b) => `${b.verdict}: ${Math.round((b.dumped / b.settled) * 100)}% dumped (${b.dumped}/${b.settled})`);
     return { text: `CrawlHive track record, ${s.total} verdicts tracked. ${lines.join("; ") || "Nothing settled yet."} Details: ${SITE}/track`, data: { ...s, proof: await proofSummary() } };
   }
+  if (/^\s*wallet\b/.test(low)) {
+    const w = t.match(ADDR)?.[0];
+    if (!w) return { text: "Send `wallet <address>`." };
+    if (!allowHit(`brain:lookup:ip:${ip}`, BRAIN_LIMITS.lookup, 10 * 60_000)) throw new Error(`Free Brain limit reached (${BRAIN_LIMITS.lookup} per 10 minutes). API: ${SITE}/brain`);
+    const r = walletReport(w);
+    return {
+      text: r.seen
+        ? `${w}: seen on ${r.tokens} other token(s) as ${Object.keys(r.roles).join(", ")}; ${r.outcomes.dumped} of ${r.outcomes.settled} settled dumped (baseline ${r.baselineDumpRate != null ? Math.round(r.baselineDumpRate * 100) + "%" : "n/a"}). ${SITE}/brain`
+        : `${w}: the swarm has not met this wallet yet. ${SITE}/brain`,
+      data: r,
+    };
+  }
   if (/\bproof\b/.test(low)) {
     const q = t.match(ADDR)?.[0] ?? t.replace(/proof/i, "").trim();
     if (!q) return { text: "Send `proof <token address or signal id>`." };
@@ -99,7 +119,7 @@ async function answer(t: string, ip: string): Promise<{ text: string; data?: unk
     };
   }
   const q = target(t);
-  if (!q) return { text: "Send a token address, a pump.fun or DexScreener link, or a $TICKER to scan it. Other commands: `proof <address>`, `track record`." };
+  if (!q) return { text: "Send a token address, a pump.fun or DexScreener link, or a $TICKER to scan it. Other commands: `wallet <address>`, `proof <address>`, `track record`." };
   if (!allowScan(ip)) {
     const p = x402Config() ? x402Prices() : null;
     throw new Error(`Free scan limit reached (8 per 10 minutes).${p ? ` Buy unlimited scans over x402: GET ${SITE}/api/x402/scan?q=… for $${p.scan} USDC.` : ""}`);

@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 export const metadata: Metadata = { title: "Extension privacy · CrawlHive" };
 
 const ITEMS: [string, string][] = [
-  ["What the extension reads", "Only the address of the tab you are on, and only on the token pages of GMGN, DexScreener, Axiom, Photon, pump.fun, Birdeye and Solscan. It does not read the page content, your inputs, cookies, other tabs or your browsing history."],
+  ["What the extension reads", "Only the address of the tab you are on, and only on the token pages of GMGN, DexScreener, Axiom, Photon, pump.fun, FOMO, Birdeye, Solscan, BscScan and BaseScan. It does not read the page content, your inputs, cookies, other tabs or your browsing history."],
   ["What it sends", "When a page has a token or pair address in its URL, the extension sends that page URL to crawlhive.xyz to get the scan verdict. Nothing else is sent: no wallet, no account, no identifiers."],
   ["What it stores", "Two settings on your device: whether the panel is collapsed, and (for developers) an API address override. No data is stored on our side beyond the public scan of the token, which anyone can open at crawlhive.xyz/scan/<address>."],
   ["Wallets and keys", "The extension never asks for, reads or touches a wallet, seed phrase, private key or signature. It cannot trade or move funds."],

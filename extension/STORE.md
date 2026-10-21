@@ -18,6 +18,8 @@ Open a token page and a small panel shows up in the corner:
 • Operators: holders, snipers and dev-funded wallets that share a funder, merged into one owner
 • LP: burned, locked until a date, or unlocked
 • The dev's earlier coins and how they ended, one tap away
+• Compact by default: score, verdict and the worst red flags, the rest one tap away
+• What changed since the last scan and a mini map of who holds the token
 • One click to the full scan on crawlhive.xyz
 
 Works for tokens on Solana, BNB Chain, Robinhood Chain and Base. The list of supported sites is on crawlhive.xyz/extension.
@@ -43,3 +45,7 @@ Not financial advice. Memecoins are extremely risky.
 
 
 **Note (Oct 19, rejection Yellow Argon, keyword spam):** do not list third-party site names in the description, summary, popup or promo images. Keep the list of supported sites on crawlhive.xyz/extension only.
+
+## What's new in 1.1.0 (paste into the store "What's new" / version notes if asked)
+
+Cleaner panel: score ring, verdict and the three worst red flags up front, everything else behind "More". New in "More": what changed since the last scan, a mini bubble map of who holds the token, and wallets the swarm has already seen on other tokens. Works on more trading sites and block explorers, including BNB Chain and Base explorers.

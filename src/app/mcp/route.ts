@@ -7,7 +7,8 @@
 import type { NextRequest } from "next/server";
 import { connection } from "next/server";
 import { allowBotScan, botByKey, botCrawlers, botSignals, botWhatsNew, type GrokBot } from "@/lib/server/bots";
-import { recentScans, runScan } from "@/lib/server/scan";
+import { allowHit, recentScans, runScan } from "@/lib/server/scan";
+import { devReport, parseWallets, tokenReport, trackReport, walletReport, walletsReport } from "@/lib/server/brain";
 import { scanBrief } from "@/lib/server/scan-brief";
 import { ApiError } from "@/lib/server/store";
 import { CORS, ISSUER } from "@/lib/server/oauth";
@@ -59,7 +60,35 @@ const TOOLS = [
     description: "Tokens people scanned on CrawlHive most recently, with their verdicts.",
     inputSchema: { type: "object", properties: {} },
   },
+  // CrawlHive Brain: память роя без нового скана, мгновенно (brain.ts).
+  {
+    name: "brain_wallet",
+    description:
+      "CrawlHive Brain: what the swarm remembers about a wallet from past scans: tokens where it was a sniper, bundle, dev, funder or linked holder, on which chains, and how those tokens ended (dumped, rugged, survived). Instant, no new scan.",
+    inputSchema: { type: "object", properties: { address: { type: "string", description: "Solana or EVM wallet address" } }, required: ["address"] },
+  },
+  {
+    name: "brain_wallets",
+    description: "CrawlHive Brain batch: screen up to 100 wallets at once (for example the top holders of a token) against the swarm's memory.",
+    inputSchema: { type: "object", properties: { addresses: { type: "array", items: { type: "string" }, maxItems: 100 } }, required: ["addresses"] },
+  },
+  {
+    name: "brain_dev",
+    description: "CrawlHive Brain: dev reputation. Launches the swarm saw from this wallet and their outcomes; on Solana also its pump.fun launch history.",
+    inputSchema: { type: "object", properties: { address: { type: "string", description: "Dev (creator) wallet address" } }, required: ["address"] },
+  },
+  {
+    name: "brain_token",
+    description: "CrawlHive Brain: the last verdict on a token, its snapshots, what changed since the previous scan and how it ended 24h later. Only for tokens scanned before; use scan_token for a fresh scan.",
+    inputSchema: { type: "object", properties: { address: { type: "string", description: "Token address" } }, required: ["address"] },
+  },
+  {
+    name: "brain_track",
+    description: "CrawlHive Brain: how often each verdict (CLEAN, OK, RISKY, DANGER, TOO_EARLY) dumped within 24h. Use it to calibrate how much to trust a verdict.",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
+const BRAIN_TOOLS = new Set(["brain_wallet", "brain_wallets", "brain_dev", "brain_token", "brain_track"]);
 
 // Когда включён x402, scan_token подсказывает, что тот же скан доступен и без ключа бота — за USDC за вызов.
 function tools() {
@@ -76,7 +105,19 @@ const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0"
 const text = (v: unknown, isError = false) => ({ content: [{ type: "text", text: typeof v === "string" ? v : JSON.stringify(v, null, 1) }], isError });
 
 async function callTool(bot: GrokBot, name: string, args: Record<string, unknown>) {
+  if (BRAIN_TOOLS.has(name) && !allowHit(`brain:mcp:${bot.id}`, 120, 10 * 60_000)) throw new ApiError("Brain limit for this bot reached (120 per 10 minutes)", 429);
+  const address = String(args.address ?? "").trim();
   switch (name) {
+    case "brain_wallet":
+      return walletReport(address);
+    case "brain_wallets":
+      return walletsReport(parseWallets({ wallets: args.addresses }));
+    case "brain_dev":
+      return devReport(address);
+    case "brain_token":
+      return tokenReport(address);
+    case "brain_track":
+      return trackReport();
     case "whats_new": {
       const since = typeof args.since === "string" ? Date.parse(args.since) : NaN;
       return botWhatsNew(bot, Number.isFinite(since) ? since : undefined);

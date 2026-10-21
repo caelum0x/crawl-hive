@@ -3,6 +3,8 @@
 // отвечает коротким вердиктом со ссылкой /scan/<адрес>: X развернёт её в нашу карточку. Без ключей X_* выключен.
 // Защита от бана: отвечаем только на упоминания, не больше X_BOT_PER_USER_HOUR ответов человеку в час,
 // X_BOT_DAILY в сутки, одну монету в одном треде не повторяем.
+// Упоминания основного аккаунта (@crawlhivexyz) читаем реже (X_BOT_MAIN_POLL_SEC) и отвечаем от его имени,
+// если заданы X_MAIN_ACCESS_TOKEN и X_MAIN_ACCESS_SECRET; иначе пробуем от бота. X_BOT_MAIN_OFF=1 выключает.
 import "server-only";
 import { createHmac, randomBytes } from "node:crypto";
 import { getMeta, setMeta } from "./store";
@@ -11,19 +13,28 @@ const API = "https://api.x.com/2";
 const POLL_MS = Number(process.env.X_BOT_POLL_SEC ?? 60) * 1000;
 const DAILY = Number(process.env.X_BOT_DAILY ?? 200);
 const PER_USER_HOUR = Number(process.env.X_BOT_PER_USER_HOUR ?? 2);
+const MAIN_POLL_MS = Number(process.env.X_BOT_MAIN_POLL_SEC ?? 60) * 1000;
+const MAIN_USER = process.env.X_MAIN_USERNAME?.trim() || "crawlhivexyz";
+const OWN_MINT = process.env.TOKEN_MINT?.trim() || "D4jNDQa3Cu4v8VMCAc2z7pgGGo7aGqzjXmwGR9wapump";
 const ADDR_RE = /\b(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})\b/;
 
 const keys = () => {
   const k = { ck: process.env.X_API_KEY?.trim(), cs: process.env.X_API_SECRET?.trim(), at: process.env.X_ACCESS_TOKEN?.trim(), as: process.env.X_ACCESS_SECRET?.trim() };
   return k.ck && k.cs && k.at && k.as ? (k as { ck: string; cs: string; at: string; as: string }) : null;
 };
+// Токены основного аккаунта в том же приложении X: ключ приложения общий, токен и секрет свои.
+const mainTokens = () => {
+  const t = { at: process.env.X_MAIN_ACCESS_TOKEN?.trim(), as: process.env.X_MAIN_ACCESS_SECRET?.trim() };
+  return t.at && t.as ? (t as { at: string; as: string }) : null;
+};
 export const xBotEnabled = () => !!keys() && process.env.X_BOT_OFF !== "1";
 
 const enc = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
 // Подпись OAuth 1.0a (HMAC-SHA1): параметры запроса строки входят в подпись, тело JSON — нет.
-function authHeader(method: string, url: string) {
-  const k = keys()!;
+// asMain — подписываем токенами основного аккаунта, иначе токенами бота.
+function authHeader(method: string, url: string, asMain = false) {
+  const k = { ...keys()!, ...(asMain ? mainTokens() : null) };
   const u = new URL(url);
   const oauth: Record<string, string> = {
     oauth_consumer_key: k.ck,
@@ -45,12 +56,12 @@ const oneCashtag = (text: string) => {
   return text.replace(/\$([A-Za-z][A-Za-z0-9_]*)/g, (m, sym) => (seen ? sym : ((seen = true), m)));
 };
 
-async function x<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function x<T>(method: "GET" | "POST", path: string, body?: unknown, asMain = false): Promise<T> {
   if (body && typeof (body as { text?: unknown }).text === "string") body = { ...(body as object), text: oneCashtag((body as { text: string }).text) };
   const url = `${API}${path}`;
   const res = await fetch(url, {
     method,
-    headers: { Authorization: authHeader(method, url), ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { Authorization: authHeader(method, url, asMain), ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(15_000),
   });
@@ -110,6 +121,9 @@ interface State {
   done?: string[];
   log?: { id: string; symbol: string; verdict: string; score: number | null; at: number }[]; // ответы бота для дневной сводки
   digestDay?: string;
+  mainId?: string; // id основного аккаунта и его курсор упоминаний
+  mainSince?: string;
+  mainAt?: number;
 }
 const KEY = "xbot";
 const load = (): State => {
@@ -194,14 +208,96 @@ async function maybeDigest(s: State) {
   console.log("[xbot] digest posted");
 }
 
+type Mentions = { data?: Tweet[]; includes?: { tweets?: Tweet[] }; meta?: { newest_id?: string } };
+const mentionQuery = (since?: string) => {
+  const q = new URLSearchParams({ max_results: "20", expansions: "referenced_tweets.id", "tweet.fields": "author_id,conversation_id,referenced_tweets,entities" });
+  if (since) q.set("since_id", since);
+  return q;
+};
+
+// Одно упоминание: ищем монету, сканируем и отвечаем. Общее для бота и основного аккаунта; main — упоминание
+// основного: отвечаем его токенами, если они есть, а отказ X (403) не повторяем.
+async function handle(t: Tweet, refs: Map<string, Tweet>, s: State, site: string, main = false) {
+  if ((s.count ?? 0) >= DAILY) return;
+  const { runScan, allowHit } = await import("./scan");
+  const asMain = main && !!mainTokens();
+  const parent = t.referenced_tweets?.find((r) => r.type === "replied_to" || r.type === "quoted");
+  // Достаточно тегнуть бота ответом на твит с контрактом: адрес берём из упоминания, а если его нет, то из твита выше.
+  // Упоминание основного: ответы под нашими постами X тоже считает упоминаниями, поэтому берём только адрес
+  // из самого твита, без твита выше и тикера, и не сканируем свой же токен.
+  let addr = main ? addrOf(t) : (addrOf(t) ?? (parent ? addrOf(refs.get(parent.id)) : undefined));
+  if (main && addr === OWN_MINT) return;
+  // Контракта нет: пробуем тикер из упоминания или из твита выше.
+  let byTick = false;
+  if (!addr && !main) {
+    const tick = tickerOf(t) ?? (parent ? tickerOf(refs.get(parent.id)) : undefined);
+    const hit = tick ? await byTicker(tick).catch(() => null) : null;
+    if (hit) {
+      addr = hit.address;
+      byTick = true;
+    }
+  }
+  if (!addr) return;
+  const pair = `${t.conversation_id ?? t.id}:${addr.toLowerCase()}`;
+  if (s.done?.includes(pair)) return;
+  const now = Date.now();
+  const recent = (s.users?.[t.author_id ?? ""] ?? []).filter((at) => now - at < 3600_000);
+  if (recent.length >= PER_USER_HOUR || !allowHit(`xbot:${t.author_id}`, PER_USER_HOUR, 3600_000)) return;
+  try {
+    const r = await runScan(addr, () => {}, undefined, { src: "agent" });
+    await x("POST", "/tweets", { text: replyText(r, site, byTick), reply: { in_reply_to_tweet_id: t.id } }, asMain);
+    s.count = (s.count ?? 0) + 1;
+    s.users = { ...s.users, [t.author_id ?? ""]: [...recent, now] };
+    s.done = [...(s.done ?? []), pair].slice(-500);
+    s.log = [...(s.log ?? []), { id: r.id, symbol: r.symbol, verdict: r.verdict, score: r.score, at: now }].slice(-300);
+    console.log(`[xbot] replied ${t.id} $${r.symbol} ${r.verdict}${main ? " (main mention)" : ""}`);
+  } catch (e) {
+    const status = (e as { status?: number }).status;
+    if (main && status === 403) {
+      console.warn(asMain ? `[xbot] main mention: reply refused, ${(e as Error).message}` : "[xbot] main mention: reply refused, set X_MAIN_ACCESS_TOKEN");
+      s.done = [...(s.done ?? []), pair].slice(-500);
+      return;
+    }
+    console.warn("[xbot]", (e as Error).message);
+    if (status === 429) throw e;
+    // Адрес не читается или пары нет: не молчим, а объясняем, что не так (один раз на тред).
+    if (!status && !main) {
+      const cut = /pu$|pum$|p$/.test(addr) && !addr.endsWith("pump");
+      const msg = /No trading pair/i.test((e as Error).message)
+        ? `I couldn't find a trading pair for ${addr.slice(0, 6)}…${addr.slice(-4)} yet. If it just launched, try again in a few minutes 🐙`
+        : `That doesn't look like a valid token contract${cut ? ": it seems cut off (pump.fun addresses end in \"pump\")" : ""}. Copy the full CA and tag me again 🐙`;
+      await x("POST", "/tweets", { text: msg, reply: { in_reply_to_tweet_id: t.id } }, asMain).catch(() => {});
+      s.users = { ...s.users, [t.author_id ?? ""]: [...recent, now] };
+      s.done = [...(s.done ?? []), pair].slice(-500);
+    }
+  }
+}
+
+// Упоминания основного аккаунта: раз в X_BOT_MAIN_POLL_SEC, без тех, где тегнули и бота (их отвечает основной цикл).
+async function mainMentions(s: State, site: string) {
+  if (process.env.X_BOT_MAIN_OFF === "1" || Date.now() - (s.mainAt ?? 0) < MAIN_POLL_MS) return;
+  s.mainAt = Date.now();
+  if (!s.mainId) s.mainId = (await x<{ data: { id: string } }>("GET", `/users/by/username/${MAIN_USER}`)).data.id;
+  const res = await x<Mentions>("GET", `/users/${s.mainId}/mentions?${mentionQuery(s.mainSince)}`);
+  // Первый запуск: запоминаем точку и не отвечаем на старые упоминания.
+  if (!s.mainSince) {
+    s.mainSince = res.meta?.newest_id ?? "0";
+    return;
+  }
+  if (res.meta?.newest_id) s.mainSince = res.meta.newest_id;
+  const refs = new Map((res.includes?.tweets ?? []).map((t) => [t.id, t]));
+  for (const t of [...(res.data ?? [])].reverse()) {
+    if (t.author_id === s.me || t.author_id === s.mainId || /@crawlhivebot\b/i.test(t.text)) continue;
+    await handle(t, refs, s, site, true);
+  }
+}
+
 async function tick() {
   const s = load();
   const today = new Date().toISOString().slice(0, 10);
   if (s.day !== today) Object.assign(s, { day: today, count: 0 });
   if (!s.me) s.me = (await x<{ data: { id: string } }>("GET", "/users/me")).data.id;
-  const q = new URLSearchParams({ max_results: "20", expansions: "referenced_tweets.id", "tweet.fields": "author_id,conversation_id,referenced_tweets,entities" });
-  if (s.since) q.set("since_id", s.since);
-  const res = await x<{ data?: Tweet[]; includes?: { tweets?: Tweet[] }; meta?: { newest_id?: string } }>("GET", `/users/${s.me}/mentions?${q}`);
+  const res = await x<Mentions>("GET", `/users/${s.me}/mentions?${mentionQuery(s.since)}`);
   const refs = new Map((res.includes?.tweets ?? []).map((t) => [t.id, t]));
   // Первый запуск: запоминаем точку и не отвечаем на старые упоминания.
   if (!s.since) {
@@ -209,51 +305,17 @@ async function tick() {
     return save(s);
   }
   if (res.meta?.newest_id) s.since = res.meta.newest_id;
-  const { runScan, allowHit } = await import("./scan");
   const site = process.env.SITE_URL?.replace(/\/$/, "") || "https://crawlhive.xyz";
-  for (const t of [...(res.data ?? [])].reverse()) {
-    if (t.author_id === s.me || (s.count ?? 0) >= DAILY) continue;
-    const parent = t.referenced_tweets?.find((r) => r.type === "replied_to" || r.type === "quoted");
-    // Достаточно тегнуть бота ответом на твит с контрактом: адрес берём из упоминания, а если его нет, то из твита выше.
-    let addr = addrOf(t) ?? (parent ? addrOf(refs.get(parent.id)) : undefined);
-    // Контракта нет: пробуем тикер из упоминания или из твита выше.
-    let byTick = false;
-    if (!addr) {
-      const tick = tickerOf(t) ?? (parent ? tickerOf(refs.get(parent.id)) : undefined);
-      const hit = tick ? await byTicker(tick).catch(() => null) : null;
-      if (hit) {
-        addr = hit.address;
-        byTick = true;
-      }
-    }
-    if (!addr) continue;
-    const pair = `${t.conversation_id ?? t.id}:${addr.toLowerCase()}`;
-    if (s.done?.includes(pair)) continue;
-    const now = Date.now();
-    const recent = (s.users?.[t.author_id ?? ""] ?? []).filter((at) => now - at < 3600_000);
-    if (recent.length >= PER_USER_HOUR || !allowHit(`xbot:${t.author_id}`, PER_USER_HOUR, 3600_000)) continue;
-    try {
-      const r = await runScan(addr, () => {}, undefined, { src: "agent" });
-      await x("POST", "/tweets", { text: replyText(r, site, byTick), reply: { in_reply_to_tweet_id: t.id } });
-      s.count = (s.count ?? 0) + 1;
-      s.users = { ...s.users, [t.author_id ?? ""]: [...recent, now] };
-      s.done = [...(s.done ?? []), pair].slice(-500);
-      s.log = [...(s.log ?? []), { id: r.id, symbol: r.symbol, verdict: r.verdict, score: r.score, at: now }].slice(-300);
-      console.log(`[xbot] replied ${t.id} $${r.symbol} ${r.verdict}`);
-    } catch (e) {
-      console.warn("[xbot]", (e as Error).message);
-      if ((e as { status?: number }).status === 429) break;
-      // Адрес не читается или пары нет: не молчим, а объясняем, что не так (один раз на тред).
-      if (!(e as { status?: number }).status) {
-        const cut = /pu$|pum$|p$/.test(addr) && !addr.endsWith("pump");
-        const msg = /No trading pair/i.test((e as Error).message)
-          ? `I couldn't find a trading pair for ${addr.slice(0, 6)}…${addr.slice(-4)} yet. If it just launched, try again in a few minutes 🐙`
-          : `That doesn't look like a valid token contract${cut ? ": it seems cut off (pump.fun addresses end in \"pump\")" : ""}. Copy the full CA and tag me again 🐙`;
-        await x("POST", "/tweets", { text: msg, reply: { in_reply_to_tweet_id: t.id } }).catch(() => {});
-        s.users = { ...s.users, [t.author_id ?? ""]: [...recent, now] };
-        s.done = [...(s.done ?? []), pair].slice(-500);
-      }
-    }
+  try {
+    for (const t of [...(res.data ?? [])].reverse()) if (t.author_id !== s.me) await handle(t, refs, s, site);
+    await mainMentions(s, site).catch((e) => {
+      if ((e as { status?: number }).status === 429) throw e;
+      console.warn("[xbot] main", (e as Error).message);
+    });
+  } catch (e) {
+    // 429: X просит подождать — сохраняем, что успели, и ждём следующего круга.
+    if ((e as { status?: number }).status !== 429) throw e;
+    console.warn("[xbot]", (e as Error).message);
   }
   await maybeDigest(s).catch((e) => console.warn("[xbot] digest", (e as Error).message));
   save(s);

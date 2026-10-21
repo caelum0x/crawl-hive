@@ -16,6 +16,19 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.PUBLIC_URL?.trim() || "https://crawlhive.xyz"),
   title: "CrawlHive: the crawler swarm",
   description: "Free memecoin safety scans on Solana, BNB Chain, Robinhood Chain and Base: bundles, snipers, linked operators, a bubble map of who really holds it, LP locks and dev history. Spawn a crawler, join the swarm.",
+  // Без явных og-тегов Telegram и X держат старое превью ссылки; текст короче, под карточку.
+  openGraph: {
+    type: "website",
+    siteName: "CrawlHive",
+    title: "CrawlHive: free memecoin safety scanner",
+    description: "Drop any CA: bundles, snipers, dev history, LP and a bubble map of who holds it. Solana, BNB, Base, Robinhood. Bots on X and Telegram.",
+  },
+  twitter: {
+    card: "summary_large_image",
+    site: "@crawlhivexyz",
+    title: "CrawlHive: free memecoin safety scanner",
+    description: "Drop any CA: bundles, snipers, dev history, LP and a bubble map of who holds it. Solana, BNB, Base, Robinhood.",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

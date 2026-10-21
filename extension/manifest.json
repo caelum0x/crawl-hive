@@ -2,14 +2,31 @@
   "manifest_version": 3,
   "name": "CrawlHive: memecoin safety scan in your terminal",
   "short_name": "CrawlHive",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "See the CrawlHive safety verdict on the memecoin page you are on: score, red flags, snipers, dev history and LP lock.",
   "homepage_url": "https://crawlhive.xyz",
-  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
-  "action": { "default_popup": "popup.html", "default_icon": { "16": "icons/16.png", "32": "icons/32.png" } },
-  "background": { "service_worker": "background.js" },
-  "permissions": ["storage"],
-  "host_permissions": ["https://crawlhive.xyz/*"],
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://crawlhive.xyz/*"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -19,9 +36,14 @@
         "https://photon-sol.tinyastro.io/*",
         "https://pump.fun/*",
         "https://birdeye.so/*",
-        "https://solscan.io/*"
+        "https://solscan.io/*",
+        "https://fomo.family/*",
+        "https://bscscan.com/*",
+        "https://basescan.org/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

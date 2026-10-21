@@ -5,7 +5,7 @@ import "server-only";
 import { getMeta, setMeta } from "./store";
 import type { ScanResult } from "./scan";
 
-interface Snap {
+export interface Snap {
   at: number;
   score: number | null;
   verdict: string;
@@ -71,8 +71,16 @@ const pct = (n: number) => `${n.toFixed(1)}%`;
 export function compareToLast(r: ScanResult): SinceLast | undefined {
   const list = load()[idOf(r.id)];
   const prev = list?.[list.length - 1];
-  if (!prev) return undefined;
-  const now = snapOf(r);
+  return prev ? diff(prev, snapOf(r)) : undefined;
+}
+
+// Снимки токена для Brain API: старые первыми, и что изменилось между двумя последними.
+export function tokenSnapshots(id: string): { snaps: Snap[]; since?: SinceLast } {
+  const snaps = load()[idOf(id)] ?? [];
+  return { snaps, since: snaps.length > 1 ? diff(snaps[snaps.length - 2], snaps[snaps.length - 1]) : undefined };
+}
+
+function diff(prev: Snap, now: Snap): SinceLast {
   const changes: SinceChange[] = [];
   if (prev.verdict !== now.verdict)
     changes.push({ label: "Verdict", from: prev.verdict.replace("_", " "), to: now.verdict.replace("_", " "), tone: (RANK[now.verdict] ?? 2) < (RANK[prev.verdict] ?? 2) ? "bad" : "good" });
