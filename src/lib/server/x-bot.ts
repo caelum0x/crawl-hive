@@ -39,7 +39,14 @@ function authHeader(method: string, url: string) {
   return "OAuth " + Object.entries({ ...oauth, oauth_signature: sig }).map(([a, b]) => `${enc(a)}="${enc(b)}"`).join(", ");
 }
 
+// X отклоняет пост с двумя и больше кэштегами (403), поэтому со второго $TICKER снимаем знак доллара.
+const oneCashtag = (text: string) => {
+  let seen = false;
+  return text.replace(/\$([A-Za-z][A-Za-z0-9_]*)/g, (m, sym) => (seen ? sym : ((seen = true), m)));
+};
+
 async function x<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  if (body && typeof (body as { text?: unknown }).text === "string") body = { ...(body as object), text: oneCashtag((body as { text: string }).text) };
   const url = `${API}${path}`;
   const res = await fetch(url, {
     method,
