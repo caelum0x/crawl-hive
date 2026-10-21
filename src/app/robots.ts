@@ -10,7 +10,7 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: "*",
         allow: "/",
-        disallow: ["/api/", "/oauth/", "/my", "/tg/admin", "/.well-known/mcp-registry-auth", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"],
+        disallow: ["/api/", "/oauth/", "/my", "/watchlist", "/tg/admin", "/.well-known/mcp-registry-auth", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"],
       },
     ],
     sitemap: `${SITE}/sitemap.xml`,

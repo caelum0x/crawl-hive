@@ -12,6 +12,7 @@ const STATIC_PATHS = [
   { path: "", priority: 1, freq: "hourly" as const },
   { path: "/radar", priority: 0.9, freq: "hourly" as const },
   { path: "/narratives", priority: 0.9, freq: "hourly" as const },
+  { path: "/pricing", priority: 0.8, freq: "weekly" as const },
   { path: "/track", priority: 0.8, freq: "daily" as const },
   { path: "/replay", priority: 0.8, freq: "daily" as const },
   { path: "/launch", priority: 0.8, freq: "daily" as const },
