@@ -3,6 +3,7 @@
 // сам (App Router Metadata Files); recentScans() — уже публичный список последних сканов (api/scan/recent, mcp).
 import type { MetadataRoute } from "next";
 import { recentScans } from "@/lib/server/scan";
+import { recentDevWallets } from "@/lib/server/scan-operators";
 
 const SITE = process.env.PUBLIC_URL?.trim() || "https://crawlhive.xyz";
 
@@ -14,6 +15,7 @@ const STATIC_PATHS = [
   { path: "/track", priority: 0.8, freq: "daily" as const },
   { path: "/replay", priority: 0.8, freq: "daily" as const },
   { path: "/launch", priority: 0.8, freq: "daily" as const },
+  { path: "/brain", priority: 0.7, freq: "weekly" as const },
   { path: "/leaderboard", priority: 0.6, freq: "daily" as const },
   { path: "/market", priority: 0.6, freq: "daily" as const },
   { path: "/signals", priority: 0.6, freq: "daily" as const },
@@ -40,5 +42,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     changeFrequency: "daily",
     priority: 0.7,
   }));
-  return [...base, ...scans];
+  // Деверы, которых память видела: /dev/<кошелёк> тоже реально ищут по адресу, но раньше в sitemap не попадал.
+  const devs: MetadataRoute.Sitemap = recentDevWallets().map((w) => ({
+    url: `${SITE}/dev/${w}`,
+    lastModified: now,
+    changeFrequency: "weekly",
+    priority: 0.5,
+  }));
+  return [...base, ...scans, ...devs];
 }
