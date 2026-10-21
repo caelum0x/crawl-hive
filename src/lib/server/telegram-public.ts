@@ -8,11 +8,11 @@
 import "server-only";
 import { TOKEN } from "@/lib/token";
 import type { ScanResult } from "./scan";
+import type { Tier } from "./tiers";
 import { call, esc, send, sendPhoto, siteUrl, telegramBotName, telegramMainApp, type Keyboard } from "./telegram";
 import { getMeta, listCrawlers, metaEntries, setMeta } from "./store";
 import { addSupport, adminChats, adminStats, isAdmin as isProjectAdmin, markAnswered, rememberAdminChat, seenTgUser, supportList } from "./admin";
 
-const SCANS_PER_HOUR = 10; // на личный чат: скан без X, но ходит в RPC
 const GROUP_SCANS_PER_HOUR = 20;
 const GROUP_TOKEN_COOLDOWN_MS = 30 * 60_000;
 const WATCH_MAX = 5;
@@ -84,9 +84,9 @@ function takeQuota(chat: string, kind: "alert" | "fu", limit: number) {
 // ---------- скан ----------
 
 const hits = new Map<string, number[]>();
-function allow(key: string, perHour: number) {
+function allow(key: string, perHour: number, windowMs = 3600_000) {
   const now = Date.now();
-  const h = (hits.get(key) ?? []).filter((t) => now - t < 3600_000);
+  const h = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
   if (h.length >= perHour) return false;
   h.push(now);
   hits.set(key, h);
@@ -216,9 +216,14 @@ async function runFor(q: string, chain?: string) {
 }
 
 async function doScan(chat: string, q: string, chain?: string) {
-  // Держателям $CRAWLHIVE втрое больше сканов в час.
-  const limit = (await holderChat(chat)) ? SCANS_PER_HOUR * 3 : SCANS_PER_HOUR;
-  if (!allow(`s:${chat}`, limit)) return send(chat, `Up to ${limit} scans an hour here${limit === SCANS_PER_HOUR ? ` (x3 for $${TOKEN.symbol} holders who link their wallet)` : ""}. Unlimited on ${siteUrl()}`);
+  // Лимит сканов в сутки — по лучшему тарифу среди кошельков, привязанных к чату (tiers.ts); в группах свой лимит.
+  const tier = await chatTier(chat);
+  const { TIER_LIMITS } = await import("./tiers");
+  const perDay = TIER_LIMITS[tier].botScansDay;
+  if (Number.isFinite(perDay) && !allow(`s:${chat}`, perDay, 86_400_000))
+    return send(chat, `Up to ${perDay} scans a day on the ${tier} plan. More with $${TOKEN.symbol} or Pro: ${siteUrl()}/pricing · Unlimited on ${siteUrl()}`);
+  // Без лимита в сутки всё равно не даём долбить RPC очередью: не больше 60 в час.
+  if (!Number.isFinite(perDay) && !allow(`sh:${chat}`, 60)) return send(chat, "Easy there: up to 60 scans an hour. Try again in a bit.");
   call("sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
   try {
     const r = await runFor(q, chain);
@@ -443,9 +448,18 @@ const radarCursor = globalThis as unknown as { __crawlhiveTgRadar?: { delayed: n
 
 // Держатели $CRAWLHIVE среди чатов с привязанным кошельком (/start с сайта): им live-радар и больше сканов.
 async function holderChat(chat: string): Promise<boolean> {
-  const { isHolder } = await import("./rewards");
-  for (const [k, c] of metaEntries("tg:")) if (c === chat && (await isHolder(k.slice(3)))) return true;
-  return false;
+  return (await chatTier(chat)) !== "free";
+}
+// Лучший тариф среди кошельков, привязанных к чату (/start с сайта); без кошелька — free.
+async function chatTier(chat: string): Promise<Tier> {
+  const { tierOf, TIER_ORDER } = await import("./tiers");
+  let best: Tier = "free";
+  for (const [k, c] of metaEntries("tg:")) {
+    if (c !== chat) continue;
+    const t = (await tierOf(k.slice(3)).catch(() => null))?.tier ?? "free";
+    if (TIER_ORDER.indexOf(t) > TIER_ORDER.indexOf(best)) best = t;
+  }
+  return best;
 }
 async function holderChats(chats: string[]): Promise<Set<string>> {
   const out = new Set<string>();
@@ -724,6 +738,77 @@ export async function handleCallback(q: { id: string; data?: string; from?: { id
 // ---------- сообщения ----------
 
 // Приветствие: баннер приложения и коротко — что умеет бот. Остальные команды работают, но в меню их нет.
+// ---------- watchlist кошельков (Pro) ----------
+
+// Владелец watchlist в этом чате: кошелёк с лучшим тарифом среди привязанных к чату.
+async function watchOwner(chat: string): Promise<string | null> {
+  const { walletsOfChat } = await import("./watchlist");
+  const { tierOf, TIER_ORDER } = await import("./tiers");
+  let best: { w: string; i: number } | null = null;
+  for (const w of walletsOfChat(chat)) {
+    const i = TIER_ORDER.indexOf((await tierOf(w).catch(() => null))?.tier ?? "free");
+    if (!best || i > best.i) best = { w, i };
+  }
+  return best?.w ?? null;
+}
+
+const LINK_FIRST = () => `Link your wallet first: open ${siteUrl()}/watchlist, sign in and press <b>Connect Telegram</b>. Then /watch works here.`;
+
+async function watchWallet(chat: string, arg: string) {
+  const [addr, ...label] = arg.trim().split(/\s+/);
+  if (!addr) return send(chat, "Send /watch followed by a wallet address and an optional label, e.g. <code>/watch 7xKX…abcd sniper guy</code>. I DM you when that wallet shows up on a new coin.");
+  const owner = await watchOwner(chat);
+  if (!owner) return send(chat, LINK_FIRST());
+  const { addWatch } = await import("./watchlist");
+  try {
+    const r = await addWatch(owner, addr, label.join(" "));
+    return send(chat, `👁 Watching <code>${esc(addr.slice(0, 4))}…${esc(addr.slice(-4))}</code>${label.length ? ` (${esc(label.join(" ").slice(0, 40))})` : ""}. ${r.count}/${r.max} on your ${r.tier} plan.\nI'll DM you the moment the swarm sees it on a new coin. /watchlist · /unwatch &lt;address&gt;`);
+  } catch (e) {
+    return send(chat, esc((e as Error).message));
+  }
+}
+
+async function walletWatchText(chat: string) {
+  const owner = await watchOwner(chat);
+  if (!owner) return `👛 <b>Wallets</b>\n${LINK_FIRST()}`;
+  const { watchState } = await import("./watchlist");
+  const st = await watchState(owner).catch(() => null);
+  if (!st) return "👛 <b>Wallets</b>\nWallet memory is unavailable right now.";
+  if (!st.max) return `👛 <b>Wallets</b>\nWallet watchlist is for $${TOKEN.symbol} holders and Pro: ${siteUrl()}/pricing`;
+  const rows = st.list.map(
+    (w) => `<code>${esc(w.wallet.slice(0, 4))}…${esc(w.wallet.slice(-4))}</code>${w.label ? ` ${esc(w.label)}` : ""} · ${w.tokens} coin${w.tokens === 1 ? "" : "s"}${w.risk ? ` · risk ${w.risk.score} ${w.risk.level}` : ""}`,
+  );
+  return [`👛 <b>Wallets</b> · ${st.list.length}/${st.max ?? "∞"} (${st.tier})`, ...(rows.length ? rows : ["Empty. Add one: /watch &lt;wallet&gt; [label]"])].join("\n");
+}
+
+// Watch оператора (Whale): /watchop <кошелёк-участник или op_…> [подпись]. Кошелёк сводится к его оператору.
+async function watchOperator(chat: string, arg: string) {
+  const [target, ...label] = arg.trim().split(/\s+/);
+  if (!target) return send(chat, "Send /watchop followed by a member wallet or an operator id, e.g. <code>/watchop op_1a2b3c4d5e6f</code>. I DM you when any wallet of that operator shows up on a new coin (Whale).");
+  const owner = await watchOwner(chat);
+  if (!owner) return send(chat, LINK_FIRST());
+  const { addWatchOp } = await import("./operator-watch");
+  try {
+    const r = await addWatchOp(owner, target, label.join(" "));
+    return send(chat, `🕸 Watching operator <code>${esc(r.op)}</code> (${r.members} wallets). ${r.count}/${r.max} on your Whale plan.\nOne DM per coin when any of its wallets shows up. /watchlist · /unwatch ${esc(r.op)}`);
+  } catch (e) {
+    return send(chat, esc((e as Error).message));
+  }
+}
+
+async function operatorWatchText(chat: string) {
+  const owner = await watchOwner(chat);
+  if (!owner) return null;
+  const { watchOpsState } = await import("./operator-watch");
+  const st = await watchOpsState(owner).catch(() => null);
+  if (!st) return null;
+  if (!st.max) return `🕸 <b>Operators</b>\nOperator watch is a Whale perk: ${siteUrl()}/pricing`;
+  const rows = st.list.map(
+    (o) => `<code>${esc(o.op ?? o.anchor.slice(0, 4) + "…" + o.anchor.slice(-4))}</code>${o.label ? ` ${esc(o.label)}` : ""} · ${o.op ? `${o.members} wallets · ${o.coins} coin${o.coins === 1 ? "" : "s"}${o.dumpRate != null ? ` · ${Math.round(o.dumpRate * 100)}% dumped` : ""}` : "not linked right now"}`,
+  );
+  return [`🕸 <b>Operators</b> · ${st.list.length}/${st.max}`, ...(rows.length ? rows : ["Empty. Add one: /watchop &lt;wallet or op id&gt;"])].join("\n");
+}
+
 function welcome(chat: string) {
   const bot = telegramBotName();
   sendPhoto(
@@ -734,6 +819,9 @@ function welcome(chat: string) {
       "",
       "🔎 <b>Send me a token</b> (address, link or $TICKER) and I check it in seconds: holders, bundles, dev wallet, copycats, plus a ⚡ Jev take.",
       "Solana · Robinhood Chain · BNB Chain · pump.fun · Meteora · four.meme",
+      "",
+      "👛 <b>/watch</b> &lt;wallet&gt;: I DM you when a wallet you follow shows up on a new coin ($CRAWLHIVE holders and Pro).",
+      "🕸 <b>/watchop</b> &lt;wallet or op id&gt;: watch a whole operator, every linked wallet (Whale).",
       "",
       `🔥 <b>$${TOKEN.symbol}</b> is live: the treasury buys back and burns it every 12 hours.`,
       `<code>${TOKEN.mint}</code>`,
@@ -866,21 +954,32 @@ export async function handlePublic(m: { chat: { id: number; type: string }; text
   if (cmd === "/alerts") return alertsMenu(chat);
   if (cmd === "/narrativealerts") return narrMenu(chat);
   if (cmd === "/burns") return burnsMenu(chat);
+  if (cmd === "/watch") return watchWallet(chat, arg);
+  if (cmd === "/watchop") return watchOperator(chat, arg);
   if (cmd === "/watchlist") {
     const mine = (watches()[chat] ?? []).filter((w) => Date.now() - w.at < WATCH_MS);
-    return send(
-      chat,
-      mine.length
-        ? ["👁 <b>Watching</b>", ...mine.map((w) => `<a href="${siteUrl()}/scan/${w.id}">$${esc(w.symbol)}</a> · ${w.verdict.replace("_", " ")} · ${Math.ceil((w.at + WATCH_MS - Date.now()) / 86400_000)}d left\n<code>${esc(w.id)}</code>`)].join("\n")
-        : "Your watchlist is empty. Scan a token and tap 👁 Watch.",
-    );
+    const tokens = mine.length
+      ? ["👁 <b>Tokens</b>", ...mine.map((w) => `<a href="${siteUrl()}/scan/${w.id}">$${esc(w.symbol)}</a> · ${w.verdict.replace("_", " ")} · ${Math.ceil((w.at + WATCH_MS - Date.now()) / 86400_000)}d left\n<code>${esc(w.id)}</code>`)].join("\n")
+      : "No tokens watched. Scan a token and tap 👁 Watch.";
+    const opsText = await operatorWatchText(chat);
+    return send(chat, `${await walletWatchText(chat)}${opsText ? `\n\n${opsText}` : ""}\n\n${tokens}`);
   }
   if (cmd === "/unwatch") {
+    const target = arg.trim();
+    // Сначала кошельки из watchlist (Pro), потом токены из старого списка наблюдения.
+    const owner = await watchOwner(chat);
+    if (owner && target) {
+      const { removeWatch } = await import("./watchlist");
+      if (await Promise.resolve().then(() => removeWatch(owner, target)).catch(() => false)) return send(chat, "Removed from your wallet watchlist.");
+      // Потом операторы (Whale): по id или кошельку-участнику.
+      const { removeWatchOp } = await import("./operator-watch");
+      if (await Promise.resolve().then(() => removeWatchOp(owner, target)).catch(() => false)) return send(chat, "Stopped watching that operator.");
+    }
     const all = watches();
     const before = all[chat]?.length ?? 0;
-    all[chat] = (all[chat] ?? []).filter((w) => w.id !== arg.trim());
+    all[chat] = (all[chat] ?? []).filter((w) => w.id !== target);
     saveWatches(all);
-    return send(chat, (all[chat]?.length ?? 0) < before ? "Removed." : "Send /unwatch followed by the token address from /watchlist.");
+    return send(chat, (all[chat]?.length ?? 0) < before ? "Removed." : "Send /unwatch followed by a wallet, operator id or token address from /watchlist.");
   }
   if (cmd === "/settings") {
     const p = prefs(chat);

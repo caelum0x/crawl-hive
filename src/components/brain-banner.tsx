@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { BrainNeurons } from "./brain-neurons";
 
 const ASKS = ["🕵️ Has this wallet sniped before?", "🧑‍💻 What did this dev launch?", "📈 What changed since the last scan?"];
 
@@ -38,19 +39,16 @@ export function BrainBanner({ className }: { className?: string }) {
             </a>
           </div>
         </div>
-        <pre className="overflow-hidden rounded-2xl border border-white/10 bg-black/60 p-4 font-mono text-xs leading-relaxed text-fg/90">
-          <span className="text-muted">GET /api/brain/v1/wallet/7xKX…</span>
-          {"\n\n"}
-          {`{
-  "seen": true,
-  "tokens": 6,
-  "roles": { "sniper": 4, "bundle": 2 },
-  "outcomes": { "settled": 5, "dumped": 4 },
-  "baselineDumpRate": 0.62
-}`}
-          {"\n\n"}
-          <span className="text-muted">example response</span>
-        </pre>
+        {/* справа живой мозг роя; пример ответа API поверх, внизу */}
+        <div className="relative min-h-[320px] lg:min-h-[420px]">
+          <BrainNeurons className="absolute inset-0 rounded-2xl border border-cyan-400/20 bg-black/40" />
+          <pre className="absolute right-3 bottom-3 left-3 overflow-hidden rounded-xl border border-white/10 bg-black/75 p-3 font-mono text-[11px] leading-relaxed text-fg/90 backdrop-blur sm:left-auto sm:w-[290px]">
+            <span className="text-cyan-300">GET</span> <span className="text-muted">/wallet/7xKX…</span>
+            {"\n"}
+            {`{ "roles": { "sniper": 4, "bundle": 2 },
+  "outcomes": { "dumped": 4 } }`}
+          </pre>
+        </div>
       </div>
     </div>
   );

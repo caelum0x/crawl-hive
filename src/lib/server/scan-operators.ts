@@ -7,15 +7,22 @@ import type { Connection } from "@solana/web3.js";
 import { getMeta, setMeta } from "./store";
 import { cachedFunding, EXCHANGE_SOL, funderSol, type BundleReport } from "./scan-bundles";
 import type { SniperReport } from "./scan-snipers";
-import { trackOutcomes } from "./track";
+import { memDb, migrateLegacy, rowsFor, walletCount, writeScan, type MemRole as DbRole } from "./memory-db";
+import { trackIndex, trackOutcomes } from "./track";
 import { recentDevWalletsFrom } from "./wallet-mem-select";
 
 export type Role = "bundle" | "dev" | "sniper";
+// На чём держится связь двух кошельков. funder — общий спонсор (кто-то пополнил оба): это связь, а не доказательство
+// общего владельца. transfer — сами переводили токен друг другу, same_tx / same_block — получили первые токены одной
+// транзакцией или в одном блоке почти равными суммами (бандл), dev — деньги или токены от создателя.
+export type LinkBasis = "funder" | "transfer" | "same_tx" | "same_block" | "dev";
+export type Edge = [string, string, LinkBasis];
 export interface Operator {
   wallets: number;
   pct: number; // сколько держит сейчас: топ-держатели плюс остаток снайперов
   roles: Role[];
   devLinked: boolean; // связан с создателем
+  basis?: LinkBasis[]; // на чём держатся связи внутри группы
 }
 // Бабл-карта: кошельки (держатели, снайперы, дев и их общие спонсоры) с долями, группой-владельцем и связями.
 // g — номер оператора (как в operators, по убыванию доли), -1 — одиночный кошелёк; hub — спонсор без своей доли.
@@ -29,13 +36,24 @@ export interface BubbleNode {
 }
 export interface BubbleMap {
   nodes: BubbleNode[];
-  links: [number, number][];
+  links: [number, number, LinkBasis?][];
 }
 export interface OperatorReport {
   operators: Operator[]; // только группы из 2+ кошельков или связанные с девом
   map?: BubbleMap;
   devSnipers: number; // снайперы, которых профинансировал создатель
   history?: { wallets: number; tokens: number; dumped: number }; // память: эти кошельки на других токенах
+  launch?: LaunchEvidence; // EVM: кто выпустил токен, через какую фабрику, кто создал пул (из scan-evm-map)
+}
+// Доказательства запуска для страницы скана и Brain.
+export interface LaunchEvidence {
+  deployer?: string;
+  factory?: string;
+  factoryLabel?: string;
+  poolCreator?: string;
+  tx?: string;
+  launchedAt?: number;
+  seenAt: number;
 }
 
 const SNIPER_TRACE = 8;
@@ -56,13 +74,13 @@ export async function buildOperators(conn: Connection, opts: { bundles?: BundleR
   const held = new Map<string, number>();
   const roles = new Map<string, Set<Role>>();
   const role = (w: string, r: Role) => roles.set(w, (roles.get(w) ?? new Set()).add(r));
-  const edges: [string, string][] = [];
+  const edges: Edge[] = [];
 
   for (const w of bundles?.wallets ?? []) held.set(w.wallet, (held.get(w.wallet) ?? 0) + w.pct);
   for (const l of bundles?.links ?? []) {
     if (exchanges.has(l.funder)) continue;
     join(l.wallet, l.funder);
-    edges.push([l.wallet, l.funder]);
+    edges.push([l.wallet, l.funder, creator && l.funder === creator ? "dev" : "funder"]);
     if (creator && l.funder === creator) role(l.wallet, "dev");
   }
   for (const c of bundles?.clusters ?? []) role(c.funder, "bundle");
@@ -80,7 +98,7 @@ export async function buildOperators(conn: Connection, opts: { bundles?: BundleR
     const big = exchanges.has(f) || (await funderSol(conn, f).catch(() => 0)) > EXCHANGE_SOL;
     if (!big) {
       join(b.wallet, f);
-      edges.push([b.wallet, f]);
+      edges.push([b.wallet, f, f === creator ? "dev" : "funder"]);
     }
   }
   if (creator) role(creator, "dev");
@@ -100,7 +118,7 @@ export async function buildOperators(conn: Connection, opts: { bundles?: BundleR
     const devLinked = !!creator && ws.includes(creator);
     if (devLinked) rs.add("dev");
     const pct = Math.round(members.reduce((a, w) => a + (held.get(w) ?? 0), 0) * 100) / 100;
-    if ((members.length >= 2 || devLinked) && pct > 0) ops.push({ wallets: members.length, pct, roles: [...rs], devLinked, root });
+    if ((members.length >= 2 || devLinked) && pct > 0) ops.push({ wallets: members.length, pct, roles: [...rs], devLinked, root, basis: basisOf(edges, find, root) });
   }
   ops.sort((a, b) => b.pct - a.pct);
   const map = bubbleMap({ ops, held, roles, edges, find, creator, token: opts.mint });
@@ -109,14 +127,27 @@ export async function buildOperators(conn: Connection, opts: { bundles?: BundleR
   const fundCount = new Map<string, number>();
   for (const [w, f] of edges) if (held.has(w) && !exchanges.has(f) && f !== creator) fundCount.set(f, (fundCount.get(f) ?? 0) + 1);
   const linkedHolders = ops.flatMap((o) => (groups.get(o.root) ?? []).filter((w) => held.has(w)));
-  rememberWallets(opts.mint, "solana", {
-    holder: linkedHolders,
-    bundle: (bundles?.links ?? []).filter((l) => !exchanges.has(l.funder)).map((l) => l.wallet),
-    sniper: buyers.map((b) => b.wallet),
-    funder: [...fundCount].filter(([, n]) => n >= 2).map(([f]) => f),
-    dev: creator ? [creator, ...(bundles?.links ?? []).filter((l) => l.funder === creator).map((l) => l.wallet)] : [],
-  });
-  return { operators: ops.slice(0, 5).map((o) => ({ wallets: o.wallets, pct: o.pct, roles: o.roles, devLinked: o.devLinked })), devSnipers, ...(history ? { history } : {}), ...(map ? { map } : {}) };
+  rememberWallets(
+    opts.mint,
+    "solana",
+    {
+      holder: linkedHolders,
+      bundle: (bundles?.links ?? []).filter((l) => !exchanges.has(l.funder)).map((l) => l.wallet),
+      sniper: buyers.map((b) => b.wallet),
+      funder: [...fundCount].filter(([, n]) => n >= 2).map(([f]) => f),
+      dev: creator ? [creator, ...(bundles?.links ?? []).filter((l) => l.funder === creator).map((l) => l.wallet)] : [],
+    },
+    // Кошельки каждого оператора скана: из них Brain собирает операторов между токенами.
+    ops.map((o) => groups.get(o.root) ?? []),
+  );
+  return { operators: ops.slice(0, 5).map((o) => ({ wallets: o.wallets, pct: o.pct, roles: o.roles, devLinked: o.devLinked, basis: o.basis })), devSnipers, ...(history ? { history } : {}), ...(map ? { map } : {}) };
+}
+
+// Основания связей внутри группы root, по силе: бандл одной транзакцией сильнее общего спонсора.
+const BASIS_ORDER: LinkBasis[] = ["same_tx", "same_block", "dev", "transfer", "funder"];
+export function basisOf(edges: Edge[], find: (w: string) => string, root: string): LinkBasis[] {
+  const set = new Set(edges.filter(([a]) => find(a) === root).map(([, , b]) => b));
+  return BASIS_ORDER.filter((b) => set.has(b));
 }
 
 const MAP_NODES = 40;
@@ -126,7 +157,7 @@ export function bubbleMap(x: {
   ops: { root: string }[];
   held: Map<string, number>;
   roles: Map<string, Set<Role>>;
-  edges: [string, string][];
+  edges: Edge[];
   find: (w: string) => string;
   creator?: string;
   token?: string;
@@ -144,13 +175,13 @@ export function bubbleMap(x: {
   };
   for (const [w] of [...x.held].sort((a, b) => b[1] - a[1])) add(w);
   if (x.creator) add(x.creator, !x.held.has(x.creator));
-  const links: [number, number][] = [];
-  for (const [a, b] of x.edges) {
+  const links: [number, number, LinkBasis?][] = [];
+  for (const [a, b, basis] of x.edges) {
     // Спонсора рисуем, только если он связывает кошельки одного оператора: одиночные пополнения не шумят.
     if (!ids.has(b) && g(b) < 0) continue;
     const i = ids.get(a) ?? add(a, true);
     const j = ids.get(b) ?? add(b, true);
-    if (i !== undefined && j !== undefined && i !== j) links.push([i, j]);
+    if (i !== undefined && j !== undefined && i !== j) links.push([i, j, basis]);
   }
   if (nodes.length < 2) return undefined;
   // «Seen before»: кошельки, которые память уже видела на других токенах.
@@ -165,9 +196,11 @@ export function bubbleMap(x: {
 }
 
 // ---------- память кошельков ----------
-// meta walletMem: { кошелёк: [записи] } — на каких токенах и в какой сети кошелёк был снайпером, бандлом, девом,
-// спонсором связанных кошельков или держателем внутри оператора. Старые записи (просто id токена, Solana) читаются как есть.
-export type MemRole = "sniper" | "bundle" | "dev" | "funder" | "holder" | "linked";
+// SQLite (memory-db.ts): на каких токенах и в какой сети кошелёк был снайпером, бандлом, девом, спонсором связанных
+// кошельков или держателем внутри оператора, плюс группы связанных кошельков для операторов между токенами.
+// Без базы — запасной путь: meta walletMem (старый формат, 8000 кошельков × 20 токенов). Старые записи (просто id
+// токена, Solana) читаются как есть; при первом открытии базы они переносятся в неё.
+export type MemRole = DbRole;
 interface MemEntry {
   t: string;
   c: string;
@@ -191,12 +224,59 @@ const loadMem = (): Mem => {
 const norm = (a: string) => (a.startsWith("0x") ? a.toLowerCase() : a);
 const entries = (list: (string | MemEntry)[] | undefined): MemEntry[] => (list ?? []).map((e) => (typeof e === "string" ? { t: e, c: "solana", r: "linked" as const } : e));
 
-export function rememberWallets(token: string, chain: string, w: Partial<Record<Exclude<MemRole, "linked">, string[]>>) {
+// База с перенесённой старой памятью (перенос один раз, при первом обращении).
+let migrated = false;
+function db() {
+  const d = memDb();
+  if (d && !migrated) {
+    migrated = true;
+    try {
+      const idx = trackIndex();
+      migrateLegacy(d, loadMem(), (t) => idx.get(norm(t))?.at ?? 0);
+    } catch (e) {
+      console.warn("[memory] migration:", (e as Error).message);
+    }
+    // Старые записи «dev» у контрактов лаунчпадов → factory, плюс поиск настоящих создателей. В фоне, один раз.
+    import("./factory-reclass").then((m) => m.reclassFactories()).catch(() => {});
+  }
+  return d;
+}
+
+// Записи по кошелькам: из базы, а без неё из meta.
+function memFor(wallets: string[]): Map<string, MemEntry[]> {
+  const ws = [...new Set(wallets.map(norm))];
+  const res = new Map<string, MemEntry[]>();
+  const d = db();
+  if (d) {
+    for (const r of rowsFor(d, ws)) res.set(r.wallet, [...(res.get(r.wallet) ?? []), { t: r.token, c: r.chain, r: r.role }]);
+    return res;
+  }
   const m = loadMem();
+  for (const w of ws) if (m[w]) res.set(w, entries(m[w]));
+  return res;
+}
+
+// groups — кошельки каждого оператора скана (2+), из них строятся операторы между токенами.
+export function rememberWallets(token: string, chain: string, w: Partial<Record<Exclude<MemRole, "linked">, string[]>>, groups: string[][] = []) {
   const t = norm(token);
   const byWallet = new Map<string, MemRole>();
-  // Одна роль на кошелёк в токене, по важности: дев, спонсор, снайпер, бандл, держатель.
-  for (const r of ["holder", "bundle", "sniper", "funder", "dev"] as const) for (const x of w[r] ?? []) byWallet.set(norm(x), r);
+  // Одна роль на кошелёк в токене, по важности: дев, фабрика, спонсор, снайпер, бандл, держатель, создатель пула.
+  for (const r of ["pool", "holder", "bundle", "sniper", "funder", "factory", "dev"] as const) for (const x of w[r] ?? []) byWallet.set(norm(x), r);
+  // Watchlist: кошельки скана, включая связанных из групп, сверяем с теми, за кем следят люди. Асинхронно, скан не ждёт.
+  const seenNow = new Map<string, MemRole>(byWallet);
+  for (const g of groups) for (const x of g) if (!seenNow.has(norm(x))) seenNow.set(norm(x), "linked");
+  import("./watchlist").then((m) => m.notifyWatchers(t, chain, seenNow)).catch(() => {});
+  // Watch операторов (Whale): те же кошельки скана сверяются с операторами, за которыми следят целиком.
+  import("./operator-watch").then((m) => m.notifyOperatorWatchers(t, chain, seenNow)).catch(() => {});
+  const d = db();
+  if (d) {
+    try {
+      return writeScan(d, t, chain, byWallet, groups.map((g) => g.map(norm)));
+    } catch (e) {
+      console.warn("[memory] write:", (e as Error).message);
+    }
+  }
+  const m = loadMem();
   for (const [x, r] of byWallet) {
     const list = entries(m[x]).filter((e) => e.t !== t);
     list.push({ t, c: chain, r });
@@ -224,12 +304,12 @@ export interface Seen {
   roles: string[];
 }
 export function seenBefore(wallets: string[], token: string): Map<string, Seen> {
-  const m = loadMem();
+  const m = memFor(wallets);
   const out = outcomes();
   const t = norm(token);
   const res = new Map<string, Seen>();
   for (const w of wallets) {
-    const list = entries(m[norm(w)]).filter((e) => e.t !== t);
+    const list = (m.get(norm(w)) ?? []).filter((e) => e.t !== t);
     if (!list.length) continue;
     const toks = new Set(list.map((e) => e.t));
     res.set(w, { tokens: toks.size, dumped: [...toks].filter((x) => out.get(x)?.dumped).length, roles: [...new Set(list.map((e) => e.r).filter((r) => r !== "linked"))] });
@@ -239,9 +319,14 @@ export function seenBefore(wallets: string[], token: string): Map<string, Seen> 
 
 // Вся память по одному кошельку (для Brain API): токены, сеть и роль, новые в конце.
 export function walletEntries(wallet: string): { token: string; chain: string; role: MemRole }[] {
-  return entries(loadMem()[norm(wallet)]).map((e) => ({ token: e.t, chain: e.c, role: e.r }));
+  return (memFor([wallet]).get(norm(wallet)) ?? []).map((e) => ({ token: e.t, chain: e.c, role: e.r }));
 }
-export const walletMemSize = () => Object.keys(loadMem()).length;
+export function walletMemSize() {
+  const d = db();
+  return d ? walletCount(d) : Object.keys(loadMem()).length;
+}
+// Хранится ли память в базе (без потолка) или в meta с потолком MEM_WALLETS.
+export const walletMemCap = () => (db() ? null : MEM_WALLETS);
 
 // Кошельки-деверы для sitemap.xml: /dev/<кошелёк> реально ищут в Google по адресу, но страница появлялась
 // в индексе только через внешние ссылки. Выбор — чистая функция в wallet-mem-select.ts (легко тестировать).
@@ -251,13 +336,13 @@ export function recentDevWallets(limit = 150): string[] {
 
 // Эти кошельки на ДРУГИХ токенах: сколько токенов и сколько из них рухнули (только закрытые исходы).
 export function walletHistory(wallets: string[], token: string) {
-  const m = loadMem();
+  const m = memFor(wallets);
   const out = outcomes();
   const t = norm(token);
   const tokens = new Set<string>();
   let seen = 0;
   for (const w of wallets) {
-    const list = entries(m[norm(w)]).filter((e) => e.t !== t);
+    const list = (m.get(norm(w)) ?? []).filter((e) => e.t !== t);
     if (list.length) seen++;
     for (const e of list) tokens.add(e.t);
   }

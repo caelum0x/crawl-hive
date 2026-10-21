@@ -46,6 +46,9 @@
 
 | Date | Update |
 | --- | --- |
+| Oct 22 | **Operator watch for Whale, Robinhood snipers fixed** (`src/lib/server/operator-watch.ts`, `src/lib/server/scan-snipers-evm.ts`): a Whale can watch a whole operator (a group of linked wallets) from the bubble map, `/watchlist` or `/watchop` in the Telegram bot, up to 25 operators; when any member, including wallets that join the group later, shows up in a new coin as sniper, bundler, dev, funder or linked holder, one Telegram alert per coin lists the members, their roles and the operator's past coins and dump rate. Robinhood Chain snipers: the launch is searched up to 14 days back (Pons curves can trade for days before the pool), log queries retry once, burn dust no longer starts the 5-second window, buys routed through a router are credited to the final wallet, EIP-7702 wallets count as wallets, and the window is measured by block timestamps instead of an average block time (on 8 recent tokens the result now matches an independent pass) |
+| Oct 22 | **Deployer, launchpad and pool creator separated, with evidence** (`src/lib/server/scan-evm-map.ts`, `src/lib/server/factory-reclass.ts`, `src/components/launch-evidence.tsx`): on EVM the "creator" from GoPlus is checked by contract code; a launchpad or factory contract is stored with the new memory role `factory`, the real deployer is the wallet that signed the first mint transfer, and the pool creator (role `pool`) signed the first transfer into the pair; when the mint is outside the log window, a background job walks back from the DexScreener pair time to find it; a one-time job moved old `dev` records of contract addresses (for example a Robinhood Chain launchpad recorded as the dev of 22 coins) to `factory` without deleting history and resolved 21 real deployers; every launch stores its tx, launch time and first-seen time (`launches` table) and the scan page, Brain `/dev` and `/wallet` show them; links carry their basis (same tx, same block, transfer, dev money, shared funder), dashed lines on the bubble map mark a shared funder as a connection, not proof of common control, and funder-only groups weigh less in the score and the wallet risk |
+| Oct 21 | **Brain: unbounded memory, operators, risk** (`src/lib/server/memory-db.ts`, `src/lib/server/brain.ts`): wallet memory moved from meta (capped at 8,000 wallets × 20 tokens) to SQLite through built-in `node:sqlite` (`DATA_DIR/brain.db`, WAL), with a one-time idempotent migration of the old memory and a fallback to meta if the database cannot open; each scan also stores its groups of linked wallets, and every 10 minutes wallets that shared a group on 2+ different coins are merged (union-find, hub wallets on 60+ coins skipped) into persistent operators `op_<hash>`; new `GET /api/brain/v1/operator/{id}` and MCP tool `brain_operator`; wallet and batch answers gain `operator` and `risk` (0 to 100: dump rate shrunk toward the baseline with a prior of 4 coins, role weight, operator record) |
 | Oct 21 | **robots.txt and sitemap.xml**: the site had neither, so Google had no pointer into `/scan/<address>` pages (exactly what people search before buying a coin) and crawled `/api/*`, `/oauth/*`, `/my` and `/tg/admin` like normal pages; `src/app/robots.ts` disallows those and points at `/sitemap.xml`, `src/app/sitemap.ts` lists every public page plus the 30 most recently scanned tokens (`recentScans()`) so each one is discoverable by ticker and contract |
 | Oct 21 | **CrawlHive Brain API** (`src/lib/server/brain.ts`, `src/app/api/brain/v1/`, docs at [crawlhive.xyz/brain](https://crawlhive.xyz/brain) and [h100envy/crawlhive-brain](https://github.com/h100envy/crawlhive-brain)): the swarm's memory as an API with no new scan behind it: `GET /wallet/{address}` (tokens where the wallet was a sniper, bundle, dev, funder or linked holder, per chain, with outcomes from the Track Record), `POST /wallets` (batch of up to 100), `GET /dev/{address}` (launches seen by the swarm plus pump.fun history on Solana), `GET /token/{address}` (last verdict, snapshots, changes since the previous scan, 24h outcome) and `GET /track` (dump rate per verdict); every answer carries `baselineDumpRate` so a wallet's record is read against how often memecoins fall anyway; free 30 lookups / 5 batches / 60 track calls per 10 minutes per IP, 10x for holders of `HOLDER_MIN` $CRAWLHIVE (Bearer: bot key `chb_`/`cht_` or site session, `BRAIN_HOLDER_X`), beyond that x402 pay per call ($0.002 lookup, $0.02 batch; `X402_PRICE_BRAIN`, `X402_PRICE_BRAIN_BATCH`) counted into the same USDC revenue that funds buybacks; the same answers are MCP tools (`brain_wallet`, `brain_wallets`, `brain_dev`, `brain_token`, `brain_track`) and an A2A skill (`wallet <address>`) |
 | Oct 20 | **Bot daily digest, honest LP on DLMM pools, Trust score (off until agreed)**: @crawlhivebot posts a daily summary at `X_BOT_DIGEST_HOUR` UTC (15) of the coins it scanned on X in the last 24h with DANGER / RISKY / CLEAN counts and a "best catch" only when a coin it flagged later dumped per the Track Record (`X_BOT_DIGEST_OFF=1` disables); the LP check now ignores position pools with no LP token (Meteora DLMM, CLMM) and judges the PumpSwap or Raydium pool, so migrated pump.fun coins no longer show a false "0% locked"; a combined Trust score (`src/lib/server/trust.ts`, 60% CrawlHive on-chain + 40% Larpcheck project, capped at 25 when either side says DANGER/SCAM/LARP) is built as a third verdict behind `TRUST_SCORE=1` and stays off until Larpcheck agrees |
@@ -93,6 +96,22 @@
 | Oct 15 | **First buyback & burn**: 0.3 SOL → 1.61M $CRAWLHIVE bought, 1.55M burned ([tx](https://solscan.io/tx/67JJFamRhQyNDZ7rYyf9Q49tC3aEN8jgyeaiCKRAPECnHyEmxptaFnUPk4pJWaffbXaBseVgHc8r3bVDEt9dCY2t)) |
 | Oct 14 | **Contract X-Ray** in every scan |
 | Oct 13 | **$CRAWLHIVE** launched on Solana |
+
+## Pricing
+
+Scanning stays free for everyone. $CRAWLHIVE unlocks more, see [crawlhive.xyz/pricing](https://crawlhive.xyz/pricing).
+
+| Tier | How | Highlights |
+| --- | --- | --- |
+| Free | nothing | full scans on the site, 20 Telegram bot scans a day, X bot, Launch Radar 5 minutes behind, Brain 30 lookups per 10 min |
+| Holder | hold about $10 of $CRAWLHIVE (amount follows the price) | live Launch Radar, 60 bot scans a day, 3 watched wallets, Brain 10x |
+| Pro | burn about $10 of $CRAWLHIVE per 30 days | unlimited bot scans, 50 watched wallets with alerts, Brain 20x and a personal key |
+| Whale | hold about $100 of $CRAWLHIVE (amount follows the price) | 500 watched wallets, watch whole operators (25), priority queue, Brain 50x |
+
+- Holder and Whale are dollar thresholds at the live price, so the token amount follows the price.
+- Pro is paid by a burn the buyer signs in Phantom (Token-2022 `burnChecked`). The server builds the unsigned transaction, then verifies the burn onchain: mint, signer, amount and that the signature was not used before. It never holds keys or tokens. Every burn is listed publicly.
+- Brain API: personal keys `chk_...` (one per wallet, stored hashed, shown once). Limits follow the key's tier. Extra calls can be bought by burning about $1 of $CRAWLHIVE per 1,000 calls; credits never expire and are used after the tier limit, before x402.
+- Tiers give access to features. They are not an investment and there are no promises about the token price.
 
 ## What is CrawlHive
 
@@ -468,9 +487,10 @@ Every scan writes to memory: which wallets sniped, bundled, launched or funded a
 | `POST /api/brain/v1/wallets` | the same summary for up to 100 wallets, body `{"wallets": [...]}` |
 | `GET /api/brain/v1/dev/{address}` | launches seen by the swarm and, on Solana, the pump.fun history |
 | `GET /api/brain/v1/token/{address}` | last verdict, snapshots, what changed since the previous scan, 24h outcome |
+| `GET /api/brain/v1/operator/{id}` | an operator: wallets the swarm saw linked together on 2+ coins, its coins, roles and outcomes |
 | `GET /api/brain/v1/track` | dump rate per verdict, misses included |
 
-Free with a per-IP limit (30 lookups, 5 batches, 60 track calls per 10 minutes). Holders of 100,000 $CRAWLHIVE get 10x: send a bot key or site session as `Authorization: Bearer`. Beyond the limit the endpoint answers 402 and any x402 client pays per call in USDC on Solana ($0.002 lookup, $0.02 batch); that revenue counts toward buybacks like paid scans. Every answer includes `baselineDumpRate`, the share of all graded tokens that dumped, because most memecoins fall and a wallet's record only means something next to it. Memory keeps the most recent 8,000 wallets (20 tokens each) and 5,000 tokens (10 snapshots each).
+Free with a per-IP limit (30 lookups, 5 batches, 60 track calls per 10 minutes). Holders (about $10 of $CRAWLHIVE) get 10x: send a bot key or site session as `Authorization: Bearer`. Beyond the limit the endpoint answers 402 and any x402 client pays per call in USDC on Solana ($0.002 lookup, $0.02 batch); that revenue counts toward buybacks like paid scans. Every answer includes `baselineDumpRate`, the share of all graded tokens that dumped, because most memecoins fall and a wallet's record only means something next to it. Wallet and batch answers also carry a `risk` score (0 to 100, with level and reasons) and the wallet's `operator` when it has one. Wallet memory lives in SQLite (`DATA_DIR/brain.db`, `src/lib/server/memory-db.ts`) with no wallet cap; the old capped memory is migrated on first start. Token snapshots keep 5,000 tokens (10 snapshots each).
 
 Docs and OpenAPI: [h100envy/crawlhive-brain](https://github.com/h100envy/crawlhive-brain). Code: `src/lib/server/brain.ts`, `src/app/api/brain/v1/`.
 
@@ -820,7 +840,8 @@ db/schema.sql                target Postgres schema
 - [x] Share cards v2, Telegram community with topic alerts and burn posts
 - [x] Holder perks; 1% of the supply burned
 - [x] Memory: token snapshots between scans, wallets, funders and devs across tokens and chains, "Seen before" on the bubble map
-- [ ] Close the sniper gap on Robinhood Chain (buys a second opinion caught that we missed)
+- [x] Close the sniper gap on Robinhood Chain (buys a second opinion caught that we missed)
+- [x] Operator watch for Whale holders
 - [x] X mentions bot [@crawlhivebot](https://x.com/crawlhivebot): tag it under a contract, it replies with the verdict and the share card
 - [ ] Paper trading: the swarm trades its own signals with fake money and posts a public P&L
 - [ ] First paid crawlers on mainnet and their public track record

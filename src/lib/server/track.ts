@@ -39,6 +39,9 @@ export interface TrackEntry {
   rugged?: boolean;
 }
 
+// Все записи Track Record (для разовых задач вроде поиска первого появления токена).
+export const trackEntries = (): TrackEntry[] => all();
+
 function all(): TrackEntry[] {
   try {
     return JSON.parse(getMeta(KEY) ?? "[]");

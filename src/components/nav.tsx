@@ -3,7 +3,7 @@ import { TOKEN } from "@/lib/token";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { Bug, LayoutGrid, Store, Trophy, Landmark, Wallet, LogOut, Plus, Radio, ShieldCheck, Radar, Target, Bot, Rocket, Sparkles, History, Puzzle, Brain } from "lucide-react";
+import { Bug, LayoutGrid, Store, Trophy, Landmark, Wallet, LogOut, Plus, Radio, ShieldCheck, Radar, Target, Bot, Rocket, Sparkles, History, Puzzle, Brain, Gem, Eye } from "lucide-react";
 import { cn, fmt, short } from "@/lib/utils";
 import { Logo } from "./logo";
 import { APP_URL, COMMUNITY_URL, TelegramIcon } from "./telegram-cta";
@@ -23,20 +23,24 @@ const LINKS = [
   { href: "/replay", label: "Gem & Rug Replay", icon: History, color: "text-pink" },
   { href: "/extension", label: "Extension", icon: Puzzle, color: "text-lime" },
   { href: "/brain", label: "Brain API", icon: Brain, color: "text-pink" },
+  { href: "/watchlist", label: "Watchlist", icon: Eye, color: "text-lime" },
+  { href: "/pricing", label: "Pricing", icon: Gem, color: "text-sky" },
   { href: "/agents", label: "For Agents", icon: Bot, color: "text-teal" },
   { href: "/market", label: "Marketplace", icon: Store, color: "text-pink" },
   { href: "/leaderboard", label: "Leaderboard", icon: Trophy, color: "text-sky" },
   { href: "/governance", label: "Governance", icon: Landmark, color: "text-violet" },
 ];
 
-// Бейдж держателя $CRAWLHIVE: видно, что бонусы (live-радар, лимиты бота) включены.
+// Бейдж тарифа (Holder, Pro, Whale): видно, что бонусы включены. Ведёт на страницу тарифов.
+const BADGE: Record<string, string> = { holder: "bg-lime", pro: "bg-pink", whale: "bg-sky" };
 function HolderBadge() {
-  const { data } = useApi<{ holder: boolean }>("/api/holder", 300_000);
-  if (!data?.holder) return null;
+  const { data } = useApi<{ tier?: string }>("/api/holder", 300_000);
+  const t = data?.tier;
+  if (!t || t === "free") return null;
   return (
-    <span className="rounded bg-lime px-1 py-px text-[9px] font-black tracking-wide text-black" title={`You hold ${TOKEN.symbol}: holder perks are on`}>
-      HOLDER
-    </span>
+    <Link href="/pricing" className={cn("rounded px-1 py-px text-[9px] font-black tracking-wide text-black", BADGE[t])} title={`${TOKEN.symbol} tier: ${t} perks are on`}>
+      {t.toUpperCase()}
+    </Link>
   );
 }
 
@@ -106,13 +110,17 @@ export function NavShell({ path }: { path: string }) {
   return (
     <>
       {/* десктоп: боковая панель */}
-      <aside data-chrome className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-line bg-panel/60 p-3 lg:flex">
-        <Link href="/" className="mb-6 flex items-center gap-2 px-2 pt-1">
+      <aside data-chrome className="sticky top-0 hidden no-scrollbar h-screen w-56 shrink-0 flex-col overflow-y-auto border-r border-line bg-panel/60 p-3 lg:flex">
+        <Link href="/" className="mb-4 flex items-center gap-2 px-2 pt-1">
           <Logo size={34} />
           <span className="text-lg font-bold tracking-tight">
             Crawl<span className="text-honey">Hive</span>
           </span>
         </Link>
+        {/* Кошелёк сверху, под логотипом: внизу длинной панели его не видно. */}
+        <div className="mb-4">
+          <WalletButton />
+        </div>
         <nav className="flex flex-col gap-0.5">
           {LINKS.map(({ href, label, icon: Icon, color }) => (
             <Link
@@ -164,9 +172,6 @@ export function NavShell({ path }: { path: string }) {
           <span className="text-base leading-none">🔥</span>${TOKEN.symbol}
           <span className="ml-auto rounded bg-honey px-1.5 py-px text-[9px] font-bold tracking-wide text-black">LIVE</span>
         </Link>
-        <div className="mt-auto">
-          <WalletButton />
-        </div>
       </aside>
 
       {/* мобильный: верхняя полоса + горизонтальные вкладки */}

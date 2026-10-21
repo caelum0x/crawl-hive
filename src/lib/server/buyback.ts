@@ -207,6 +207,8 @@ export async function buybackStats() {
     revenue: await revenue(l),
     burned: m ? Number(burnedRaw) / scale : 0,
     burnedPct,
+    // Сжигания пользователей за Pro и вызовы Brain (user-burns.ts) — отдельно, чтобы не смешивать с байбеками.
+    userBurned: (await import("./user-burns")).userBurnStats().total,
     supply: m ? Number(m.supplyRaw) / scale : null,
     last: l.items.find((x) => x.kind === "buyback") ?? null,
     items: l.items,

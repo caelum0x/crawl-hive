@@ -5,6 +5,7 @@
 import { TOKEN } from "@/lib/token";
 import { XRayPanel, type XRayView } from "@/components/xray-panel";
 import { BubbleMap, type BubbleMapData } from "@/components/bubble-map";
+import { LaunchEvidence, type LaunchData } from "@/components/launch-evidence";
 import { LarpLine, type LarpLineData } from "@/components/larp-line";
 import { TrustScore, type TrustData } from "@/components/trust-score";
 import { SinceLastScan, type SinceData } from "@/components/since-last-scan";
@@ -60,13 +61,14 @@ interface Result {
   holders?: { top1: number; top10: number; mintAuthority: boolean; freezeAuthority: boolean };
   bundles?: { checked: number; clusters: { wallets: number; pct: number; funder: string }[]; fresh: { wallets: number; pct: number } };
   dev?: { creator: string; launched: number; graduated: number; walletAgeHours?: number; walletTxs: number; holdsPct?: number };
+  launch?: LaunchData;
   snipers?: { wallets: number; boughtPct: number; holdPct: number; sold: number; slots: number };
   insiders?: { wallets: number; pct: number };
   lp?: { status: string; lockedPct: number | null; unlockAt?: number; locker?: string };
   larp?: LarpLineData;
   trust?: TrustData;
   since?: SinceData;
-  operators?: { operators: { wallets: number; pct: number; roles: string[]; devLinked: boolean }[]; devSnipers: number; history?: { wallets: number; tokens: number; dumped: number }; map?: BubbleMapData };
+  operators?: { operators: { wallets: number; pct: number; roles: string[]; devLinked: boolean; basis?: string[] }[]; devSnipers: number; history?: { wallets: number; tokens: number; dumped: number }; map?: BubbleMapData };
   evm?: { holders?: number; top10?: number; honeypot?: boolean; owner?: string | null };
   xray?: XRayView;
   core?: string;
@@ -437,7 +439,7 @@ function ResultCard({ r, x, onCheckX }: { r: Result; x: XState; onCheckX: () => 
         {r.operators?.operators[0] && (
           <Flag
             ok={r.operators.operators[0].roles.length < 2 && r.operators.operators[0].pct < 20}
-            label={`operator: ${r.operators.operators[0].wallets} wallets · ${r.operators.operators[0].pct.toFixed(1)}% · ${r.operators.operators[0].roles.join("+")}`}
+            label={`${r.operators.operators[0].basis?.length === 1 && r.operators.operators[0].basis[0] === "funder" ? "connection (shared funder)" : "operator"}: ${r.operators.operators[0].wallets} wallets · ${r.operators.operators[0].pct.toFixed(1)}% · ${r.operators.operators[0].roles.join("+")}`}
           />
         )}
         {!!r.operators?.devSnipers && <Flag ok={false} label={`${r.operators.devSnipers} dev-funded sniper${r.operators.devSnipers > 1 ? "s" : ""}`} />}
@@ -458,6 +460,7 @@ function ResultCard({ r, x, onCheckX }: { r: Result; x: XState; onCheckX: () => 
           </a>
         ))}
       </div>
+      {r.launch && <LaunchEvidence l={r.launch} chain={r.chain} />}
       <ShareScan id={r.id} text={shareText(r)} />
       {r.operators?.map && <BubbleMap data={r.operators.map} ops={r.operators.operators} chain={r.chain} />}
       {r.xray && <XRayPanel x={r.xray} />}

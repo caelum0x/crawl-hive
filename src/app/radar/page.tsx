@@ -212,7 +212,7 @@ export default function RadarPage() {
             <span className="font-semibold">{data?.waiting ?? 0} newer finds</span>
             <span className="text-muted">
               {" "}
-              are waiting out the {data?.delayMin ?? 10}-minute delay. Hold {(data?.holderMin ?? 100_000).toLocaleString("en-US")} ${TOKEN.symbol} and connect your wallet to see them live, or spawn a crawler for launches filtered to your own rules.
+              are waiting out the {data?.delayMin ?? 10}-minute delay. Hold {data?.holderMin ? data.holderMin.toLocaleString("en-US") : "about $10 of"} ${TOKEN.symbol} and connect your wallet to see them live, or spawn a crawler for launches filtered to your own rules.
             </span>
           </span>
           <Link href="/#treasury" className="rounded-xl bg-honey px-3 py-1.5 text-sm font-bold text-black hover:opacity-90">

@@ -2,7 +2,7 @@
 // адресу — рынок (DexScreener), права минта и держатели (Solana RPC; на Robinhood Chain — GeckoTerminal и
 // владелец контракта), клоны тикера, упоминания в Telegram — и сводят всё в оценку 0–100 с одной строкой вывода.
 import "server-only";
-import { trackVerdict, type TrackEntry } from "./track";
+import { trackStats, trackVerdict, type TrackEntry } from "./track";
 import { PublicKey } from "@solana/web3.js";
 import { bestPairs, searchPairs, type PairInfo } from "./crawl/dexscreener";
 import { fetchChannel } from "./crawl/sources/telegram";
@@ -11,7 +11,8 @@ import { getMeta, setMeta } from "./store";
 import { traceBundles, type BundleReport } from "./scan-bundles";
 import { traceSnipers, type SniperReport } from "./scan-snipers";
 import { evmSnipersMaxAgeH, evmSnipersSupported, traceEvmSnipers } from "./scan-snipers-evm";
-import { buildOperators, type OperatorReport } from "./scan-operators";
+import { buildOperators, type LaunchEvidence, type OperatorReport } from "./scan-operators";
+import { launchOf, memDb, putLaunch } from "./memory-db";
 import { buildEvmMap, evmMapSupported } from "./scan-evm-map";
 import { lpSupported, traceLp, type LpReport } from "./scan-lp";
 import { larpVerdict, type LarpVerdict } from "./larpcheck";
@@ -58,6 +59,7 @@ export interface ScanResult {
   holders?: { top1: number; top10: number; mintAuthority: boolean; freezeAuthority: boolean };
   bundles?: BundleReport;
   dev?: DevReport;
+  launch?: LaunchEvidence; // кто выпустил токен, фабрика лаунчпада, создатель пула, транзакция выпуска и время
   snipers?: SniperReport; // кто купил в первых блоках и сколько держит сейчас
   insiders?: { wallets: number; pct: number }; // топ-держатели, которых пополнил кошелёк создателя
   operators?: OperatorReport; // связанные кошельки, склеенные в владельцев, и их история на других токенах
@@ -109,6 +111,15 @@ const CORE: Record<string, string> = {
 export const SCAN_CHAINS: Record<string, string> = { solana: "Solana", robinhood: "Robinhood Chain", bsc: "BNB Chain", base: "Base" };
 const chainName = (c: string) => SCAN_CHAINS[c] ?? c;
 const RECENT_KEY = "recentScans";
+// Сколько монет моложе 30 минут (TOO_EARLY) слились за сутки, по Track Record; кэш на 10 минут.
+let earlyCache: { at: number; pct: number | null } | undefined;
+function earlyDumpPct() {
+  if (earlyCache && Date.now() - earlyCache.at < 600_000) return earlyCache.pct;
+  const v = trackStats().by.find((x) => x.verdict === "TOO_EARLY");
+  earlyCache = { at: Date.now(), pct: v && v.settled >= 50 ? Math.round((v.dumped / v.settled) * 100) : null };
+  return earlyCache.pct;
+}
+
 const SAVED_KEY = "scanResults";
 const SAVED_MAX = 200;
 const CACHE_MS = 2 * 60_000;
@@ -592,6 +603,37 @@ export async function runScan(
   if (xray) log({ crawler: "crawler_xray", text: `${xray.summary}${xray.findings.length ? ` · ${xray.findings.filter((f) => f.severity !== "low").map((f) => f.label.toLowerCase()).join(", ") || "only launch mechanics"}` : " · nothing the owner can pull"}`, tone: xray.findings.some((f) => f.severity === "high") ? "bad" : xray.findings.some((f) => f.severity === "medium") ? "warn" : "ok" });
   const clones = cloneInfo.n;
 
+  // Доказательства запуска: создатель (кошелёк, подписавший выпуск), фабрика лаунчпада, создатель пула, транзакция
+  // и время выпуска, когда рой увидел токен. EVM — из buildEvmMap, Solana — из трейса создателя.
+  const launch: LaunchEvidence | undefined = core
+    ? undefined
+    : chain === "solana"
+      ? dev
+        ? { deployer: dev.creator, factory: dev.factory, factoryLabel: dev.factory ? "pump.fun" : undefined, tx: dev.tx, launchedAt: dev.launchedAt ?? market?.pair.pairCreatedAt, seenAt: Date.now() }
+        : undefined
+      : operators?.launch
+        ? { ...operators.launch } // время выпуска только из транзакции выпуска: пул на EVM часто создаётся намного позже
+        : undefined;
+  if (launch) {
+    const d = memDb();
+    const key = chain === "solana" ? address : address.toLowerCase();
+    if (d)
+      try {
+        putLaunch(d, { token: key, chain, deployer: launch.deployer ?? null, factory: chain === "solana" ? null : (launch.factory ?? null), poolCreator: launch.poolCreator ?? null, tx: launch.tx ?? null, launchedAt: launch.launchedAt ?? null });
+        // Из базы: когда рой увидел токен впервые и что уже нашёл фоновый поиск (настоящего создателя, транзакцию).
+        const k = launchOf(d, key);
+        if (k) {
+          launch.seenAt = k.seenAt;
+          launch.deployer ??= k.deployer ?? undefined;
+          launch.tx ??= k.tx ?? undefined;
+          launch.launchedAt = k.launchedAt ?? launch.launchedAt;
+          launch.poolCreator ??= k.poolCreator ?? undefined;
+        }
+      } catch (e) {
+        console.warn("[scan] launch:", (e as Error).message);
+      }
+  }
+
   // ---------- оценка ----------
   let score = 100;
   const p = market?.pair;
@@ -622,7 +664,16 @@ export async function runScan(
   if (operators?.devSnipers) hit("Dev-funded snipers", -20, `${operators.devSnipers} wallet${operators.devSnipers > 1 ? "s" : ""} that bought in the first blocks ${chain === "solana" ? "were funded by" : "got tokens from or sent tokens to"} the creator`);
   const bigOp = operators?.operators[0];
   // Один кошелёк дева — это «Dev holds a lot», а не оператор: штрафуем только группы из 2+ кошельков.
-  if (bigOp && bigOp.wallets >= 2 && ((bigOp.roles.length > 1 && bigOp.pct >= 15) || bigOp.pct >= 30)) hit("One operator", -15, `${bigOp.wallets} linked wallets (${bigOp.roles.join(" + ")}) hold ${pct(bigOp.pct)}`);
+  // Связь только через общего спонсора — это связь, а не доказательство одного владельца: штраф мягче и так и пишем.
+  const funderOnly = bigOp?.basis?.length === 1 && bigOp.basis[0] === "funder";
+  if (bigOp && bigOp.wallets >= 2 && ((bigOp.roles.length > 1 && bigOp.pct >= 15) || bigOp.pct >= 30))
+    hit(
+      "One operator",
+      funderOnly ? -10 : -15,
+      funderOnly
+        ? `${bigOp.wallets} wallets connected by a shared funder hold ${pct(bigOp.pct)} (a connection, not proof of common control)`
+        : `${bigOp.wallets} linked wallets (${bigOp.roles.join(" + ")}) hold ${pct(bigOp.pct)}`,
+    );
   const hist = operators?.history;
   if (hist && hist.dumped >= 3 && hist.dumped / hist.tokens >= 0.5) hit("Known dump wallets", -10, `${hist.wallets} of these wallets were on ${hist.tokens} other tokens, ${hist.dumped} of them dumped`);
   if (snipers && snipers.holdPct >= 15) hit("Snipers hold a lot", -15, `${snipers.wallets} first-block buyers still hold ${pct(snipers.holdPct)}`);
@@ -674,21 +725,23 @@ export async function runScan(
     !!market && market.ageHours !== undefined && market.ageHours < 0.5 && !holders?.mintAuthority && !holders?.freezeAuthority && !evm?.honeypot && !xray?.findings.some((f) => f.severity === "high") && !factors.some((f) => SERIOUS.includes(f.label));
   const verdict: Verdict = tooEarly ? "TOO_EARLY" : score >= 80 ? "CLEAN" : score >= 60 ? "OK" : score >= 40 ? "RISKY" : "DANGER";
   const worst = [...factors].sort((a, b) => a.impact - b.impact)[0];
+  const early = tooEarly ? earlyDumpPct() : null;
   const reason = tooEarly
-    ? "Pair is under 30 minutes old: too early to judge"
+    ? `Under 30 minutes old, early read only${early ? `: ${early}% of coins this young dumped within 24h` : ""}. Scan again after 30 min`
     : worst && worst.impact < 0
       ? `${worst.label}: ${worst.note}`
       : core
         ? `${core}: a core ${chainName(chain)} asset, not a memecoin`
         : "No red flags found by the crawlers";
 
-  const trust = trustEnabled() ? trustScore({ score: tooEarly ? null : score, verdict }, larp) : null;
+  const trust = trustEnabled() ? trustScore({ score, verdict }, larp) : null;
   const result: ScanResult = {
     id: address,
     chain,
     symbol: symbol || address.slice(0, 4),
     name: p?.baseToken.name ?? "",
-    score: tooEarly ? null : score,
+    // Свежей монете тоже показываем предварительную оценку: прочерк прятал самый частый исход (слив).
+    score,
     verdict,
     reason,
     factors,
@@ -717,6 +770,7 @@ export async function runScan(
     ...(trust ? { trust } : {}),
     lp,
     dev,
+    ...(launch ? { launch } : {}),
     evm,
     xray,
     core,

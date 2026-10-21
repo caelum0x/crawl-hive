@@ -140,9 +140,10 @@ const VERDICT_ICON: Record<string, string> = { CLEAN: "🟢", OK: "🟢", RISKY:
 // Значок вердикта Larpcheck: зелёный для REAL, красный для LARP и SCAM, жёлтый для остального.
 const larpIcon = (v: string) => (/SCAM|LARP/.test(v) ? "🔴" : /REAL/.test(v) && !/PARTLY/.test(v) ? "🟢" : "🟡");
 
-function replyText(r: { symbol: string; score: number | null; verdict: string; reason: string; id: string; larp?: { verdict: string; score: number | null; headline?: string | null } }, site: string, byTick = false) {
-  // Монету нашли по тикеру: пишем, какой контракт проверили, чтобы человек мог сверить.
-  const head = `${VERDICT_ICON[r.verdict] ?? "⚪️"} CrawlHive: $${r.symbol} ${r.score != null ? `${r.score}/100 ` : ""}${r.verdict.replace("_", " ")}${byTick ? `\nMost liquid $${r.symbol}: ${r.id.slice(0, 6)}…${r.id.slice(-4)}` : ""}`;
+function replyText(r: { symbol: string; score: number | null; verdict: string; reason: string; id: string; larp?: { verdict: string; score: number | null; headline?: string | null } }, site: string, byTick = false, from?: string) {
+  // Монету нашли по тикеру или в био автора: пишем, откуда взяли контракт, чтобы человек мог сверить.
+  const src = byTick ? `\nMost liquid $${r.symbol}: ${r.id.slice(0, 6)}…${r.id.slice(-4)}` : from ? `\nCA from @${from}'s bio: ${r.id.slice(0, 6)}…${r.id.slice(-4)}` : "";
+  const head = `${VERDICT_ICON[r.verdict] ?? "⚪️"} CrawlHive: $${r.symbol} ${r.score != null ? `${r.score}/100 ` : ""}${r.verdict.replace("_", " ")}${src}`;
   const link = `\n\nFull scan, holders map: ${site}/scan/${r.id}`;
   // Причина риска — коротко; Larpcheck — отдельным блоком со своим значком и, если влезает, их выводом.
   const reason = r.reason.length > 70 ? `${r.reason.slice(0, 69)}…` : r.reason;
@@ -208,28 +209,37 @@ async function maybeDigest(s: State) {
   console.log("[xbot] digest posted");
 }
 
-type Mentions = { data?: Tweet[]; includes?: { tweets?: Tweet[] }; meta?: { newest_id?: string } };
+interface XUser { id: string; username: string; description?: string; entities?: { description?: { urls?: { expanded_url?: string }[] } } }
+type Mentions = { data?: Tweet[]; includes?: { tweets?: Tweet[]; users?: XUser[] }; meta?: { newest_id?: string } };
 const mentionQuery = (since?: string) => {
-  const q = new URLSearchParams({ max_results: "20", expansions: "referenced_tweets.id", "tweet.fields": "author_id,conversation_id,referenced_tweets,entities" });
+  const q = new URLSearchParams({
+    max_results: "20",
+    expansions: "referenced_tweets.id,referenced_tweets.id.author_id",
+    "tweet.fields": "author_id,conversation_id,referenced_tweets,entities",
+    "user.fields": "description,entities",
+  });
   if (since) q.set("since_id", since);
   return q;
 };
 
 // Одно упоминание: ищем монету, сканируем и отвечаем. Общее для бота и основного аккаунта; main — упоминание
 // основного: отвечаем его токенами, если они есть, а отказ X (403) не повторяем.
-async function handle(t: Tweet, refs: Map<string, Tweet>, s: State, site: string, main = false) {
+async function handle(t: Tweet, refs: Map<string, Tweet>, s: State, site: string, main = false, users = new Map<string, XUser>()) {
   if ((s.count ?? 0) >= DAILY) return;
   const { runScan, allowHit } = await import("./scan");
   const asMain = main && !!mainTokens();
   const parent = t.referenced_tweets?.find((r) => r.type === "replied_to" || r.type === "quoted");
   // Достаточно тегнуть бота ответом на твит с контрактом: адрес берём из упоминания, а если его нет, то из твита выше.
-  // Упоминание основного: ответы под нашими постами X тоже считает упоминаниями, поэтому берём только адрес
-  // из самого твита, без твита выше и тикера, и не сканируем свой же токен.
-  let addr = main ? addrOf(t) : (addrOf(t) ?? (parent ? addrOf(refs.get(parent.id)) : undefined));
+  // Упоминание основного: ответы под нашими постами X тоже считает упоминаниями. Твит выше берём, только если
+  // в упоминании одни теги (человек явно позвал нас под монетой) и этот твит не наш; свой токен не сканируем.
+  const up = parent ? refs.get(parent.id) : undefined;
+  const onlyTags = !t.text.replace(/@\w+/g, "").replace(/[\s.,!?·]+/g, "");
+  const useUp = !main || (onlyTags && !!up && up.author_id !== s.mainId && up.author_id !== s.me);
+  let addr = addrOf(t) ?? (useUp ? addrOf(up) : undefined);
   if (main && addr === OWN_MINT) return;
   // Контракта нет: пробуем тикер из упоминания или из твита выше.
   let byTick = false;
-  if (!addr && !main) {
+  if (!addr && (!main || useUp)) {
     const tick = tickerOf(t) ?? (parent ? tickerOf(refs.get(parent.id)) : undefined);
     const hit = tick ? await byTicker(tick).catch(() => null) : null;
     if (hit) {
@@ -237,7 +247,22 @@ async function handle(t: Tweet, refs: Map<string, Tweet>, s: State, site: string
       byTick = true;
     }
   }
-  if (!addr) return;
+  // В треде ни адреса, ни тикера: проект часто держит CA в био автора поста выше (так у h100envy).
+  let from: string | undefined;
+  const author = up?.author_id ? users.get(up.author_id) : undefined;
+  if (!addr && (!main || useUp) && author && author.id !== s.me && author.id !== s.mainId) {
+    const bio = `${author.description ?? ""} ${(author.entities?.description?.urls ?? []).map((u) => u.expanded_url ?? "").join(" ")}`;
+    addr = bio.match(ADDR_RE)?.[1];
+    if (addr) from = author.username;
+  }
+  if (!addr) {
+    // Позвали бота, а монеты нигде нет: один раз на тред подсказываем, а не молчим.
+    const key = `${t.conversation_id ?? t.id}:none`;
+    if (main || !onlyTags || s.done?.includes(key)) return;
+    s.done = [...(s.done ?? []), key].slice(-500);
+    await x("POST", "/tweets", { text: "I couldn't find a contract in this thread 🐙 Reply with the CA, a pump.fun or DexScreener link, or the ticker, and tag me again.", reply: { in_reply_to_tweet_id: t.id } }).catch(() => {});
+    return;
+  }
   const pair = `${t.conversation_id ?? t.id}:${addr.toLowerCase()}`;
   if (s.done?.includes(pair)) return;
   const now = Date.now();
@@ -245,7 +270,7 @@ async function handle(t: Tweet, refs: Map<string, Tweet>, s: State, site: string
   if (recent.length >= PER_USER_HOUR || !allowHit(`xbot:${t.author_id}`, PER_USER_HOUR, 3600_000)) return;
   try {
     const r = await runScan(addr, () => {}, undefined, { src: "agent" });
-    await x("POST", "/tweets", { text: replyText(r, site, byTick), reply: { in_reply_to_tweet_id: t.id } }, asMain);
+    await x("POST", "/tweets", { text: replyText(r, site, byTick, from), reply: { in_reply_to_tweet_id: t.id } }, asMain);
     s.count = (s.count ?? 0) + 1;
     s.users = { ...s.users, [t.author_id ?? ""]: [...recent, now] };
     s.done = [...(s.done ?? []), pair].slice(-500);
@@ -286,9 +311,10 @@ async function mainMentions(s: State, site: string) {
   }
   if (res.meta?.newest_id) s.mainSince = res.meta.newest_id;
   const refs = new Map((res.includes?.tweets ?? []).map((t) => [t.id, t]));
+  const users = new Map((res.includes?.users ?? []).map((u) => [u.id, u]));
   for (const t of [...(res.data ?? [])].reverse()) {
     if (t.author_id === s.me || t.author_id === s.mainId || /@crawlhivebot\b/i.test(t.text)) continue;
-    await handle(t, refs, s, site, true);
+    await handle(t, refs, s, site, true, users);
   }
 }
 
@@ -307,7 +333,8 @@ async function tick() {
   if (res.meta?.newest_id) s.since = res.meta.newest_id;
   const site = process.env.SITE_URL?.replace(/\/$/, "") || "https://crawlhive.xyz";
   try {
-    for (const t of [...(res.data ?? [])].reverse()) if (t.author_id !== s.me) await handle(t, refs, s, site);
+    const users = new Map((res.includes?.users ?? []).map((u) => [u.id, u]));
+    for (const t of [...(res.data ?? [])].reverse()) if (t.author_id !== s.me) await handle(t, refs, s, site, false, users);
     await mainMentions(s, site).catch((e) => {
       if ((e as { status?: number }).status === 429) throw e;
       console.warn("[xbot] main", (e as Error).message);

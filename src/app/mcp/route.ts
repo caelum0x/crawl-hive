@@ -8,7 +8,7 @@ import type { NextRequest } from "next/server";
 import { connection } from "next/server";
 import { allowBotScan, botByKey, botCrawlers, botSignals, botWhatsNew, type GrokBot } from "@/lib/server/bots";
 import { allowHit, recentScans, runScan } from "@/lib/server/scan";
-import { devReport, parseWallets, tokenReport, trackReport, walletReport, walletsReport } from "@/lib/server/brain";
+import { devReport, operatorReport, parseWallets, tokenReport, trackReport, walletReport, walletsReport } from "@/lib/server/brain";
 import { scanBrief } from "@/lib/server/scan-brief";
 import { ApiError } from "@/lib/server/store";
 import { CORS, ISSUER } from "@/lib/server/oauth";
@@ -83,12 +83,17 @@ const TOOLS = [
     inputSchema: { type: "object", properties: { address: { type: "string", description: "Token address" } }, required: ["address"] },
   },
   {
+    name: "brain_operator",
+    description: "CrawlHive Brain: an operator, a set of wallets the swarm saw linked together on 2+ different coins (ids come from brain_wallet / brain_wallets). Members, coins, roles and how those coins ended.",
+    inputSchema: { type: "object", properties: { id: { type: "string", description: "Operator id, like op_1a2b3c4d5e6f" } }, required: ["id"] },
+  },
+  {
     name: "brain_track",
     description: "CrawlHive Brain: how often each verdict (CLEAN, OK, RISKY, DANGER, TOO_EARLY) dumped within 24h. Use it to calibrate how much to trust a verdict.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
-const BRAIN_TOOLS = new Set(["brain_wallet", "brain_wallets", "brain_dev", "brain_token", "brain_track"]);
+const BRAIN_TOOLS = new Set(["brain_wallet", "brain_wallets", "brain_dev", "brain_token", "brain_operator", "brain_track"]);
 
 // Когда включён x402, scan_token подсказывает, что тот же скан доступен и без ключа бота — за USDC за вызов.
 function tools() {
@@ -116,6 +121,8 @@ async function callTool(bot: GrokBot, name: string, args: Record<string, unknown
       return devReport(address);
     case "brain_token":
       return tokenReport(address);
+    case "brain_operator":
+      return operatorReport(String(args.id ?? ""));
     case "brain_track":
       return trackReport();
     case "whats_new": {

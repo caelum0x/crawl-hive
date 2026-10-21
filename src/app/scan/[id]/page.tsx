@@ -7,11 +7,13 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { ArrowRight, ExternalLink, Radar } from "lucide-react";
 import { savedScan, type ScanResult } from "@/lib/server/scan";
+import { launchOf, memDb } from "@/lib/server/memory-db";
 import { CHAIN_LABEL, VERDICT_COLOR, VERDICT_LABEL, explorerToken, shareText } from "@/lib/scan-share";
 import { ShareScan } from "@/components/share-scan";
 import { XVoices } from "@/components/x-voices";
 import { XRayPanel } from "@/components/xray-panel";
 import { BubbleMap } from "@/components/bubble-map";
+import { LaunchEvidence } from "@/components/launch-evidence";
 import { LarpLine } from "@/components/larp-line";
 import { TrustScore } from "@/components/trust-score";
 import { SinceLastScan } from "@/components/since-last-scan";
@@ -47,6 +49,12 @@ async function ScanView({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const r = savedScan(id);
   if (!r) redirect(`/?scan=${encodeURIComponent(id)}`);
+  // Доказательства запуска свежими из базы: настоящего создателя фоновый поиск может найти уже после скана.
+  const db = memDb();
+  const fresh = db ? launchOf(db, r.chain === "solana" ? r.id : r.id.toLowerCase()) : null;
+  const launch = fresh
+    ? { ...r.launch, deployer: fresh.deployer ?? r.launch?.deployer, factory: r.launch?.factory ?? fresh.factory ?? undefined, poolCreator: fresh.poolCreator ?? r.launch?.poolCreator, tx: fresh.tx ?? r.launch?.tx, launchedAt: fresh.launchedAt ?? r.launch?.launchedAt, seenAt: fresh.seenAt }
+    : r.launch;
   const color = VERDICT_COLOR[r.verdict];
   const m = r.market;
   const age = m?.ageHours === undefined ? "-" : m.ageHours < 48 ? `${m.ageHours.toFixed(1)}h` : `${Math.round(m.ageHours / 24)}d`;
@@ -106,6 +114,11 @@ async function ScanView({ params }: { params: Promise<{ id: string }> }) {
 
         <Factors r={r} />
 
+        {launch && (
+          <div className="mt-4">
+            <LaunchEvidence l={{ ...launch, deployer: launch.deployer ?? undefined }} chain={r.chain} />
+          </div>
+        )}
         <ShareScan id={r.id} text={shareText(r)} className="mt-4" />
 
         {r.operators?.map && <BubbleMap data={r.operators.map} ops={r.operators.operators} chain={r.chain} className="mt-4" />}

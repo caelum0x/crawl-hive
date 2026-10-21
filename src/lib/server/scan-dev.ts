@@ -23,6 +23,9 @@ export interface DevReport {
   walletAgeHours?: number; // возраст кошелька создателя, если у него меньше 1000 транзакций
   walletTxs: number; // транзакций (до 1000)
   holdsPct?: number; // сколько этого токена у создателя сейчас, % эмиссии
+  factory?: string; // программа лаунчпада (pump.fun), если токен выпущен через неё
+  tx?: string; // транзакция выпуска, если нашли (первая транзакция с минтом)
+  launchedAt?: number; // время выпуска, мс
 }
 
 const g = globalThis as unknown as { __crawlhiveDev?: Map<string, { at: number; report: DevReport }> };
@@ -60,15 +63,17 @@ export async function launchesOf(endpoint: string, creator: string) {
 
 // Самая первая транзакция с минтом: идём по подписям назад страницами по 1000. У свежего токена боты за минуты
 // набивают тысячи сделок, поэтому до 25 страниц, но не дольше 9 секунд — у старых токенов просто не ищем.
-async function firstPayer(conn: Connection, mint: PublicKey): Promise<string | null> {
+async function firstPayer(conn: Connection, mint: PublicKey): Promise<{ payer: string; sig: string; at?: number } | null> {
   let before: string | undefined;
   let oldest: string | undefined;
+  let oldestAt: number | undefined;
   const deadline = Date.now() + 9_000;
   for (let page = 0; ; page++) {
     if (page >= 25 || Date.now() > deadline) return null;
     const sigs = await conn.getSignaturesForAddress(mint, { limit: 1000, before });
     if (!sigs.length) break;
     oldest = sigs[sigs.length - 1].signature;
+    oldestAt = sigs[sigs.length - 1].blockTime ?? undefined;
     if (sigs.length < 1000) break;
     before = oldest;
   }
@@ -79,7 +84,8 @@ async function firstPayer(conn: Connection, mint: PublicKey): Promise<string | n
     { encoding: "json", maxSupportedTransactionVersion: 1, commitment: "confirmed" },
   ]);
   const k = tx?.transaction?.message?.accountKeys?.[0];
-  return typeof k === "string" ? k : (k?.pubkey ?? null);
+  const payer = typeof k === "string" ? k : k?.pubkey;
+  return payer ? { payer, sig: oldest, at: oldestAt ? oldestAt * 1000 : undefined } : null;
 }
 
 export async function traceDev(conn: Connection, mint: string, supplyRaw?: number): Promise<DevReport | null> {
@@ -87,7 +93,8 @@ export async function traceDev(conn: Connection, mint: string, supplyRaw?: numbe
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.report;
   const key = new PublicKey(mint);
   const curve = await creatorOf(conn, key);
-  const creator = curve?.creator ?? (await firstPayer(conn, key).catch(() => null));
+  const first = curve ? null : await firstPayer(conn, key).catch(() => null);
+  const creator = curve?.creator ?? first?.payer;
   if (!creator) return null;
   const owner = new PublicKey(creator);
 
@@ -112,6 +119,8 @@ export async function traceDev(conn: Connection, mint: string, supplyRaw?: numbe
     walletTxs: sigs.length,
     walletAgeHours: oldest ? (Date.now() / 1000 - oldest) / 3600 : undefined,
     holdsPct,
+    ...(curve ? { factory: PUMP.toBase58() } : {}),
+    ...(first ? { tx: first.sig, launchedAt: first.at } : {}),
   };
   cache().set(mint, { at: Date.now(), report });
   return report;
