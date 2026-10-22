@@ -64,3 +64,42 @@ container found on either host).
   already-broadcast, already-signed tx by its signature. Did not touch any of these files this
   session — the gap I shipped (`sitemap.ts`/`robots.ts`) is pure SEO metadata, no money code
   touched.
+
+### 2026-10-22 session, continued (extension v1.1.1)
+
+- Still blocked on the same PR #5 owner click (`caelum0x` still READ-only on `h100envy/crawl-hive`,
+  re-confirmed via `gh repo view`). Pushed this session's work to `caelum0x/crawl-hive` directly
+  (fork, write access confirmed) — no new PR needed yet, folds into the same pending merge.
+- **Found and fixed a real distribution gap**: CrawlHive's own Clean Launch feature sends every BNB
+  Chain launch to `four.meme/token/<address>` (`src/app/launch/page.tsx`), and the server already
+  knows how to classify that domain (`src/lib/server/ext.ts`'s `CHAIN_HINT` already matched
+  `four.meme` → `bsc`), but the browser extension's `manifest.json` never listed `four.meme` in
+  `content_scripts.matches` — so a coin launched from CrawlHive itself never got the verdict badge
+  on its own launchpad page. Added `https://four.meme/*` to the extension manifest, added
+  "four.meme" to the public "Works on" list (`src/app/extension/page.tsx`), bumped the extension to
+  **1.1.1**, and rebuilt `public/extension/crawlhive-extension.zip` (the manual-install download) so
+  it matches the new code.
+- **Second fix, same file**: BscScan/BaseScan were matched on every page (`/address/0x..`,
+  `/tx/0x..`, `/block/..`), not just token pages, so the content script would try to treat a wallet
+  or a transaction hash as a token address (Etherscan-style explorers only show a dedicated token
+  page at `/token/0x...`). Added a path restriction (`/^\/token\//`) for both hosts, the same pattern
+  already used for FOMO's `/tokens/` restriction. Cuts wasted scan calls and any chance of a
+  confusing verdict showing up on a non-token page.
+- Verified: `tsc --noEmit` clean, `node --test` 8/8 pass, `next build` succeeds and `/extension`
+  prerenders with "four.meme" in the static HTML, `manifest.json` parses with version 1.1.1 and the
+  new match pattern, `content.js`/`background.js` both parse as valid JS, and the rebuilt zip
+  contains the updated `manifest.json` and `content.js`.
+- Logged in `src/components/shipped.tsx` (public changelog) and `extension/STORE.md` ("What's new in
+  1.1.1").
+- **Owner-only blocker (new)**: this makes the *manual-install* zip (served from crawlhive.xyz once
+  deployed) immediately useful, but the **Chrome Web Store listing** (the "Add to Chrome" button,
+  what most users actually install) still serves 1.1.0 until someone logs into the Chrome Web Store
+  Developer Dashboard and uploads the new package / bumps the listing version — that login is
+  owner-only (Google account + 2FA), same class of blocker as the GitHub PR merge. Package it from
+  `extension/` (same 9 files as the existing zip, now updated) when ready to publish.
+- Real-money paths again not touched this session: re-read `tiers.ts`, `watchlist.ts`,
+  `operator-watch.ts` and `proof.ts` (treasury-funded Solana memo notarization — real SOL spend) to
+  confirm they still follow the same server-never-holds-a-user-key shape described above; none were
+  modified. The two fixes shipped this session are both in `extension/` and its two tiny website
+  mirrors (`extension/page.tsx`'s site list, `shipped.tsx`'s changelog) — no billing, no server
+  money code touched.

@@ -11,7 +11,9 @@
   // На обозревателях адрес в ссылке часто кошелёк, а не токен: там ошибку не показываем, просто прячем плашку.
   const EXPLORER = /(^|\.)(solscan\.io|bscscan\.com|basescan\.org)$/;
   // У FOMO токен только на /tokens/<сеть>/<адрес>; на профилях и остальных страницах плашка не нужна.
-  const PAGE = { "fomo.family": /^\/tokens\// };
+  // BscScan/BaseScan (Etherscan-style) используют /token/0x... для токена и /address/0x..|/tx/0x..|/block/..
+  // для всего остального: без фильтра плашка пыталась бы сканировать кошельки, транзакции и блоки как токен.
+  const PAGE = { "fomo.family": /^\/tokens\//, "bscscan.com": /^\/token\//, "basescan.org": /^\/token\// };
   let lastUrl = "";
   let host, root, hiddenFor = "";
 

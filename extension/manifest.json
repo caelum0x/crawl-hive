@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CrawlHive: memecoin safety scan in your terminal",
   "short_name": "CrawlHive",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "See the CrawlHive safety verdict on the memecoin page you are on: score, red flags, snipers, dev history and LP lock.",
   "homepage_url": "https://crawlhive.xyz",
   "icons": {
@@ -39,7 +39,8 @@
         "https://solscan.io/*",
         "https://fomo.family/*",
         "https://bscscan.com/*",
-        "https://basescan.org/*"
+        "https://basescan.org/*",
+        "https://four.meme/*"
       ],
       "js": [
         "content.js"

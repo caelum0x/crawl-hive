@@ -49,3 +49,7 @@ Not financial advice. Memecoins are extremely risky.
 ## What's new in 1.1.0 (paste into the store "What's new" / version notes if asked)
 
 Cleaner panel: score ring, verdict and the three worst red flags up front, everything else behind "More". New in "More": what changed since the last scan, a mini bubble map of who holds the token, and wallets the swarm has already seen on other tokens. Works on more trading sites and block explorers, including BNB Chain and Base explorers.
+
+## What's new in 1.1.1
+
+Now also works on the four.meme token page (BNB Chain), matching coins launched with CrawlHive's own Clean Launch. On BscScan and BaseScan the panel now only shows up on the actual token page, not on every wallet, transaction or block page.
